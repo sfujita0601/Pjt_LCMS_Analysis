@@ -213,42 +213,14 @@ Pearson (直線関係)、Spearman・Kendall (単調な関係、外れ値に頑�
 GSSG/GSH は酸化ストレスの指標として用いられる) は、サンプルごとの希釈や正規化の係数が分子と分母で打ち消し合うため、
 正規化の方法に依存しません。比の分布は右に裾を引くことが多いので、検定では対数 (log2) を取るのが一般的です。
 
-## 10. 外部データと正準相関分析
-
-### 外部データの統合
-脂質・臨床検査値など、サンプル ID ごとに複数の指標を持つ表 (CSV / TSV / Excel) を読み込み、label と照合して統合します。
-外部データの指標は IS 補正・サンプル間正規化の対象外です (単位や測定原理が異なるため)。対数変換は、負の値を
-含まない列にだけ行います。
-
-### 正準相関分析 (CCA)
-2 つの変数グループ X (p 変数) と Y (q 変数) について、相関が最大になる線形結合 $u = Xa$, $v = Yb$ を順に求めます [32]。
-""")
-st.latex(r"\rho_1 = \max_{a, b} \operatorname{corr}(Xa, Yb), \qquad \text{以降は前の成分と無相関という条件の下で最大化}")
-st.markdown("""
-サンプル数 n に対して p + q が大きいと、標本共分散行列が特異になり正準相関は自明に 1 になります。
-本アプリでは共分散を単位行列へ縮小する正則化 (canonical ridge) [33, 34] を使えます。
-""")
-st.latex(r"C_{xx}(\lambda) = (1 - \lambda) S_{xx} + \lambda I, \quad C_{yy}(\lambda) = (1 - \lambda) S_{yy} + \lambda I")
-st.markdown("""
-正則化しても当てはめの正準相関は過大になりやすいので、次の 2 つで確かめます。
-
-- **並べ替え検定**: X と Y のサンプルの対応をランダムに入れ替えて同じ計算を繰り返し、各成分の正準相関が偶然これ以上になる割合を p 値とします [35]。
-  正規分布を仮定する Bartlett の近似検定 (Wilks の Λ) は n が p + q より十分大きいときにしか使えないため採用していません
-- **一つ抜き交差検証**: 1 サンプルを除いて重みを求め、除いたサンプルの正準変量を予測した値どうしの相関です。
-  新しいサンプルでどの程度関係が再現されるかの目安になります
-
-各変数の寄与は、構造相関 (変数と自分の側の正準変量の相関) で解釈します。重み $a$, $b$ は変数間の相関 (多重共線性) で
-不安定になりやすいため、解釈には向きません。
-
-## 11. 再現性 (解析設定の保存)
+## 10. 再現性 (解析設定の保存)
 
 サイドバーの「解析設定を保存」で、画面のすべての設定 (データの扱い・正規化・マスク・条件設定・サンプルの使用/除外・
 検量線の選択・比の定義・各タブの設定・KEGG の対応表) と、データファイルの SHA-256 ハッシュ、主要ライブラリの
 バージョンを JSON に保存します。同じデータファイルを選んでから「解析設定を読み込む」で復元すると、
-同じ結果が得られます。ハッシュが一致しない場合は警告を表示します。外部データもファイル名とハッシュを記録します
-(data/ に置いたファイルは名前で選び直せます)。UMAP と相関ネットワークの配置は乱数の種を固定しています。
+同じ結果が得られます。ハッシュが一致しない場合は警告を表示します。UMAP と相関ネットワークの配置は乱数の種を固定しています。
 
-## 12. KEGG PATHWAY
+## 11. KEGG PATHWAY
 
 KEGG [20, 21] の経路図と、図上の化合物の座標 (KGML) を KEGG REST API から取得し、
 測定した化合物の位置に log2FC の色を重ねます。化合物名と KEGG Compound ID の対応は
@@ -290,8 +262,4 @@ st.markdown("""
 29. Wei R, Wang J, Su M, et al. Missing value imputation approach for mass spectrometry-based metabolomics data. *Sci Rep*. 2018;8:663. doi:10.1038/s41598-017-19120-0
 30. Dunnett CW. A multiple comparison procedure for comparing several treatments with a control. *J Am Stat Assoc*. 1955;50(272):1096–1121.
 31. Weissgerber TL, Milic NM, Winham SJ, Garovic VD. Beyond bar and line graphs: time for a new data presentation paradigm. *PLoS Biol*. 2015;13(4):e1002128. doi:10.1371/journal.pbio.1002128
-32. Hotelling H. Relations between two sets of variates. *Biometrika*. 1936;28(3–4):321–377.
-33. Vinod HD. Canonical ridge and econometrics of joint production. *J Econom*. 1976;4(2):147–166.
-34. González I, Déjean S, Martin PGP, Baccini A. CCA: an R package to extend canonical correlation analysis. *J Stat Softw*. 2008;23(12):1–14.
-35. Winkler AM, Renaud O, Smith SM, Nichols TE. Permutation inference for canonical correlation analysis. *NeuroImage*. 2020;220:117065. doi:10.1016/j.neuroimage.2020.117065
 """)

@@ -8,7 +8,6 @@ charset-normalizer==3.5.2
 click==8.5.0
 cloudpickle==3.1.2
 colorama==0.4.6 ; platform_system == 'Windows'
-et-xmlfile==2.0.0
 formulaic==1.2.2
 h11==0.16.0
 httptools==0.8.0
@@ -25,7 +24,6 @@ narwhals==2.26.0
 networkx==3.7
 numba==0.67.0
 numpy==2.5.3
-openpyxl==3.1.5
 packaging==26.3
 pandas==3.0.6
 patsy==1.0.3
