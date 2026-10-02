@@ -199,12 +199,23 @@ with st.sidebar:
     sources = [(n, b) for n, (_, b) in zip(names, sources)]
 
     try:
-        compound_sets = [load_tables(b, IS_NAME)[2] for _, b in sources]
+        loaded = [load_tables(b, IS_NAME) for _, b in sources]
     except ValueError as e:
         st.error(str(e))
         st.stop()
-    common = [c for c in compound_sets[0] if all(c in s for s in compound_sets)]
-    is_name = st.selectbox("内部標準", common, index=common.index(IS_NAME) if IS_NAME in common else 0, key="is_name")
+
+    def is_candidates(raw, cpds):
+        """内部標準の候補: STD 以外の全サンプルで検出された化合物 (欠けていると補正できないサンプルが出るため)。"""
+        samples = raw[~raw[LABEL_COL].map(is_std)]
+        return [c for c in cpds if len(samples) and samples[c].notna().all()]
+
+    sets = [is_candidates(raw, cpds) for raw, _, cpds in loaded]
+    common = [c for c in sets[0] if all(c in s for s in sets)]
+    if not common:
+        st.error("全サンプルで検出された化合物が無いため、内部標準を選べません")
+        st.stop()
+    is_name = st.selectbox("内部標準", common, index=common.index(IS_NAME) if IS_NAME in common else 0, key="is_name",
+                           help="全サンプル (STD を除く) で検出された化合物だけを候補にしています")
     na_rep = st.text_input("CSV の欠損値表記", value="", key="na_rep", help=f"未検出 ({MISSING}) を置き換える文字。空欄のままでも可")
 
     st.header("2. 解析に使うデータ")
@@ -549,7 +560,9 @@ def single_mode(d):
                                           hovertemplate="%{x}: %{y:.1f}%<extra></extra>"))
                 ev_fig.update_layout(title="寄与率 (%)", height=240, margin=dict(t=40, b=30), barcornerradius=4)
                 st.plotly_chart(ev_fig, width="stretch", key=f"ev_{g}")
-                load = pd.DataFrame(pca.components_[[a - 1, b - 1]].T, index=X.columns, columns=[f"PC{a}", f"PC{b}"])
+                pcs = list(dict.fromkeys([a, b]))  # 横軸と縦軸に同じ PC を選んだ場合は 1 列だけ
+                load = pd.DataFrame(pca.components_[[k - 1 for k in pcs]].T, index=X.columns,
+                                    columns=[f"PC{k}" for k in pcs])
                 with st.expander("ローディング (寄与の大きい化合物)"):
                     st.dataframe(load.reindex(load[f"PC{a}"].abs().sort_values(ascending=False).index).round(3),
                                  height=300)

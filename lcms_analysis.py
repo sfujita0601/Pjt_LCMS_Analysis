@@ -74,10 +74,11 @@ def load_tables(raw_bytes, is_name):
     if is_name in blocks:
         rows = []
         for f, ratio, conc in normalize_by_is(files, blocks, meta, is_name):
-            rows.append([f, *meta[f], ratio] + [conc.get(c, np.nan) for c in compounds])
+            # 内部標準が未検出のサンプルは比率が None になる (補正できないので欠損として扱う)
+            rows.append([f, *meta[f], np.nan if ratio is None else ratio] + [conc.get(c, np.nan) for c in compounds])
         corrected = pd.DataFrame(rows, columns=[FILE_COL, LABEL_COL, DILUTION_COL, RATIO_COL] + compounds)
-        corrected[compounds] = corrected[compounds].round(3)
-        corrected[RATIO_COL] = corrected[RATIO_COL].round(4)
+        corrected[compounds] = corrected[compounds].astype(float).round(3)
+        corrected[RATIO_COL] = corrected[RATIO_COL].astype(float).round(4)
     return raw, corrected, compounds
 
 
