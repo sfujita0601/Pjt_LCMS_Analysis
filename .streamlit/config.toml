@@ -1,0 +1,7 @@
+[server]
+# アップロードできるファイルの上限 (MB)
+maxUploadSize = 200
+
+[browser]
+# 利用状況の統計を Streamlit 社に送らない
+gatherUsageStats = false

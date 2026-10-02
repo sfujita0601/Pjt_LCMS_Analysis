@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+.DS_Store
+.kegg_cache/
+
+# パスワード (Community Cloud では Secrets に設定する)
+.streamlit/secrets.toml
+
+# 測定データは公開リポジトリに入れない (アプリからアップロードして使う)
+data/*
+!data/.gitkeep
