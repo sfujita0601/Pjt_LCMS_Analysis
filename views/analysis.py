@@ -18,12 +18,14 @@ from lcms_plots import bar_samples, bar_summary, clustered_heatmap, heatmap_grid
 from make_conc_table import FILE_COL, IS_NAME, LABEL_COL, MISSING, is_std
 from ui_common import colormap_select, colorscale_for, compound_picker, compound_select, theme, to_csv_bytes
 from ui_qc import accuracy_tab, calibration_choices, calibration_tab, drift_tab, merged_table
+from ui_external import cca_tab, external_tab, groups_tab, merge_external
 from ui_extra import limits_tab, multigroup_tab, ratio_definitions, ratio_view
 from ui_project import check_data, loader, saver
 from ui_stats import correlation_tab, kegg_tab, scatter_tab, volcano_tab
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 SINGLE, MULTI = "単一データセット", "複数データセット統合"
+EXTERNAL_FILES = []  # 解析設定の保存用: 読み込んだ外部データ [(ファイル名, bytes)]
 BY_GROUP, MERGED = "希釈グループごとに解析", "検量線範囲で統合 (1 サンプル 1 行)"
 UNSET = "未設定"
 
@@ -298,10 +300,11 @@ def make_base(d, cond_map, control, merged=None, used=None, cond_filter=None):
 
 # ================================================================ 単一データセット
 def single_mode(d):
-    tabs = st.tabs(["条件設定", "検量線・希釈", "STD 正確さ", "LOD・LOQ", "ドリフト", "テーブル", "代謝物比", "棒グラフ",
-                    "ヒートマップ", "散布図", "クラスタリング", "PCA", "UMAP", "ボルケーノ", "多群比較", "相関", "KEGG"])
-    (tab_cond, tab_cal, tab_acc, tab_lim, tab_drift, tab_tbl, tab_ratio, tab_bar, tab_hm, tab_sc,
-     tab_cl, tab_pca, tab_umap, tab_vol, tab_mg, tab_cor, tab_kegg) = tabs
+    tabs = st.tabs(["条件設定", "検量線・希釈", "STD 正確さ", "LOD・LOQ", "ドリフト", "テーブル", "代謝物比", "外部データ",
+                    "変数グループ", "棒グラフ", "ヒートマップ", "散布図", "クラスタリング", "PCA", "UMAP", "ボルケーノ",
+                    "多群比較", "相関", "正準相関", "KEGG"])
+    (tab_cond, tab_cal, tab_acc, tab_lim, tab_drift, tab_tbl, tab_ratio, tab_ext, tab_grp, tab_bar, tab_hm, tab_sc,
+     tab_cl, tab_pca, tab_umap, tab_vol, tab_mg, tab_cor, tab_cca, tab_kegg) = tabs
     all_labels = sorted(d["raw"][LABEL_COL].unique(), key=la.natural_key)
 
     with tab_cond:
@@ -329,6 +332,11 @@ def single_mode(d):
     with tab_ratio:
         ratios = ratio_definitions(d["compounds"])
         add_ratio = st.checkbox("比を他の解析にも追加 (棒グラフ・ヒートマップ・散布図・検定など)", value=True, key="ratio_add")
+    with tab_ext:
+        ext_specs = external_tab(all_labels, harmonize, DATA_DIR)
+        add_ext = st.checkbox("外部データの指標を他の解析にも追加 (相関・クラスタリング・PCA・検定など)", value=True,
+                              key="ext_add")
+        EXTERNAL_FILES[:] = [(spec["name"], spec["raw"]) for spec in ext_specs]
 
     with st.sidebar:
         st.header("4. 解析に使うサンプル")
@@ -339,6 +347,17 @@ def single_mode(d):
         base = la.add_ratios(base, ratios)  # 比は正規化係数に依存しないので、正規化の後に計算する
         if add_ratio:
             compounds = compounds + [r[0] for r in ratios]
+    ext_groups = {}
+    if ext_specs:
+        # 外部データは IS 補正・正規化の対象外なので、正規化の後に結合する
+        base, ext_groups = merge_external(base, ext_specs, harmonize, set(d["compounds"]) | {r[0] for r in ratios})
+        if add_ext:
+            compounds = compounds + [c for cols in ext_groups.values() for c in cols]
+    with tab_grp:
+        auto = {f"外部データ: {n}": cols for n, cols in ext_groups.items()}
+        if ratios:
+            auto["代謝物の比"] = [r[0] for r in ratios]
+        var_groups = groups_tab(compounds, auto)
     n_all = int((~d["raw"].drop_duplicates(LABEL_COL)[LABEL_COL].map(is_std)).sum())
     n_used = base.loc[~base[LABEL_COL].map(is_std), LABEL_COL].nunique()
     if n_used < n_all:
@@ -575,6 +594,8 @@ def single_mode(d):
         multigroup_tab(base, groups, conds, compounds, pal, control if has_control else None)
     with tab_cor:
         correlation_tab(base, groups, conds, compounds, pal, vres)
+    with tab_cca:
+        cca_tab(base, var_groups, groups, conds, pal)
     with tab_kegg:
         kegg_tab(d["compounds"], vres, pal)
 
@@ -731,4 +752,4 @@ else:
 
 with st.sidebar:
     st.header("解析設定の保存")
-    saver(sources)
+    saver(sources, EXTERNAL_FILES)
