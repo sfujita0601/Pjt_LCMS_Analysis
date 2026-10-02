@@ -2,7 +2,7 @@
 name = "pjt-lcms"
 version = "0.1.0"
 description = "LC-MS/MS (LabSolutions) 定量結果の整形"
-requires-python = ">=3.13"
+requires-python = ">=3.12"
 dependencies = [
     "networkx>=3.7",
     "openpyxl>=3.1.5",

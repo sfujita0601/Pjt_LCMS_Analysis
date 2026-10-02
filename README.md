@@ -53,7 +53,7 @@ yamada = "パスワード1"
 
 1. このフォルダを GitHub のリポジトリにする (測定データ `data/` とパスワード `secrets.toml` は `.gitignore` で除外済み)
 2. https://share.streamlit.io で「Create app」→ リポジトリ・ブランチを選び、Main file path に `app.py` を指定
-3. 「Advanced settings」で Python のバージョンを **3.13** にし、Secrets に `password = "..."` を貼り付けて Deploy
+3. 「Advanced settings」で Python のバージョンを **3.12 以上** (既定の 3.12 のままで可) にし、Secrets に `password = "..."` を貼り付けて Deploy
 4. Secrets を設定し忘れた場合、アプリは起動を止めてその旨を表示します (誰でも使える状態にはなりません)
 
 ライブラリは `uv.lock` (または `requirements.txt`) から入ります。`pyproject.toml` を変えたときは、次のコマンドで
