@@ -2,7 +2,7 @@
 import numpy as np
 import streamlit as st
 
-from lcms_analysis import FC, LOG2FC
+from lcms_analysis import FC, GROUP_PRESETS, LOG2FC
 from lcms_plots import PALETTE, colormap_options, resolve_colormap, scale
 
 
@@ -71,16 +71,48 @@ def symmetric_limit(values, limit=0.0):
 PICK_ALL, PICK_ONLY, PICK_EXCLUDE = "すべて", "選んだ化合物のみ", "選んだ化合物を除外"
 
 
+def available_groups(compounds):
+    """選択に使えるグループ: よく使う分類 (データにある化合物が 2 つ以上) + 変数グループ タブで作ったもの。"""
+    have = set(compounds)
+    groups = {}
+    for name, members in GROUP_PRESETS.items():
+        m = [x for x in members if x in have]
+        if len(m) >= 2:
+            groups[f"{name} ({len(m)})"] = m
+    for name, members in (st.session_state.get("_var_groups") or {}).items():
+        m = [x for x in members if x in have]
+        if m:
+            groups[f"{name} ({len(m)})"] = m
+    return groups
+
+
+def _group_select(container, key, compounds, disabled=False):
+    groups = available_groups(compounds)
+    if not groups:
+        return []
+    gsel = container.multiselect("グループでまとめて選ぶ", list(groups), key=f"{key}_cgrp", disabled=disabled,
+                                 help="アミノ酸 (タンパク質構成 20 種) などの分類や、変数グループ タブで作ったグループ")
+    return [m for g in gsel for m in groups.get(g, [])]
+
+
+def compound_select(key, compounds, default=None, label="化合物", max_selections=None):
+    """図に描く化合物を選ぶ (個別 + グループ)。選んだ順 (グループは分類の順) のリストを返す。"""
+    c1, c2 = st.columns([3, 2])
+    sel = c1.multiselect(label, compounds, default=default, key=key, placeholder="化合物を選択 (名前の一部で検索できます)")
+    out = list(dict.fromkeys(list(sel) + _group_select(c2, key, compounds)))
+    if max_selections and len(out) > max_selections:
+        st.warning(f"表示できるのは {max_selections} 個までです。最初の {max_selections} 個を表示します。")
+        out = out[:max_selections]
+    return out
+
+
 def compound_picker(key, compounds, label="対象の化合物"):
     """解析の対象にする化合物を選ぶ (すべて / 選んだものだけ / 選んだものを除く)。"""
     c1, c2 = st.columns([1, 3])
     mode = c1.radio(label, [PICK_ALL, PICK_ONLY, PICK_EXCLUDE], key=f"{key}_cmode")
     sel = c2.multiselect("化合物", compounds, key=f"{key}_csel", disabled=mode == PICK_ALL,
                          placeholder="化合物を選択 (名前の一部を入力して検索できます)")
-    groups = st.session_state.get("_var_groups") or {}
-    if groups:
-        gsel = c2.multiselect("変数グループでまとめて選ぶ", list(groups), key=f"{key}_cgrp", disabled=mode == PICK_ALL)
-        sel = list(dict.fromkeys(list(sel) + [m for g in gsel for m in groups.get(g, [])]))
+    sel = list(dict.fromkeys(list(sel) + _group_select(c2, key, compounds, disabled=mode == PICK_ALL)))
     if mode == PICK_ONLY:
         if not sel:
             c2.caption("化合物を選ぶまでは、すべての化合物を使います。")

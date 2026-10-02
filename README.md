@@ -20,6 +20,16 @@ uv sync                          # 初回のみ: 必要なライブラリを入�
 uv run streamlit run app.py      # ブラウザで http://localhost:8501 が開く
 ```
 
+フォルダの名前や場所を変えたあとに `ModuleNotFoundError` や `bad interpreter` が出る場合は、仮想環境を作り直してください
+(`.venv` の中のコマンドには作成時のフォルダの場所が書き込まれているため、`uv sync` だけでは直りません)。
+
+```bash
+rm -rf .venv && uv sync
+```
+
+起動は必ず `uv run streamlit run app.py` で行ってください。単に `streamlit run app.py` とすると、
+別の環境の Streamlit が使われて同じエラーになることがあります。
+
 コマンドラインで濃度表だけ作る場合:
 
 ```bash

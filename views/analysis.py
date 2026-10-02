@@ -16,7 +16,7 @@ from lcms_analysis import (
 )
 from lcms_plots import bar_samples, bar_summary, clustered_heatmap, heatmap_grid, resolve_colormap, scale, scatter_2d
 from make_conc_table import FILE_COL, IS_NAME, LABEL_COL, MISSING, is_std
-from ui_common import colormap_select, colorscale_for, compound_picker, theme, to_csv_bytes
+from ui_common import colormap_select, colorscale_for, compound_picker, compound_select, theme, to_csv_bytes
 from ui_qc import accuracy_tab, calibration_choices, calibration_tab, drift_tab, merged_table
 from ui_external import cca_tab, external_tab, groups_tab, merge_external
 from ui_extra import limits_tab, multigroup_tab, ratio_definitions, ratio_view
@@ -397,7 +397,8 @@ def single_mode(d):
     with tab_bar:
         by_cond, kind, stat = view_controls("bar", has_control, [CONC, FC, LOG2FC])
         c1, c2 = st.columns([4, 1])
-        sel = c1.multiselect("化合物", compounds, default=compounds[:1], max_selections=12, key="bar_cpds")
+        with c1:
+            sel = compound_select("bar_cpds", compounds, default=compounds[:1], max_selections=40)
         show_points = c2.checkbox("各サンプルの点を重ねる", value=True, disabled=not by_cond, key="bar_pts")
         if sel:
             ytitle = kind
@@ -700,7 +701,8 @@ def multi_mode(datasets):
 
     with tab_bar:
         c1, c2 = st.columns([4, 1])
-        sel = c1.multiselect("化合物", compounds, default=compounds[:1], max_selections=12, key="m_sel")
+        with c1:
+            sel = compound_select("m_sel", compounds, default=compounds[:1], max_selections=40)
         show_points = c2.checkbox("各サンプルの点を重ねる", value=True, key="m_pts")
         if sel:
             s = summ[summ[CPD_COL].isin(sel)]

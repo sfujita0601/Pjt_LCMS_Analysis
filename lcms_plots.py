@@ -72,22 +72,30 @@ def ref_line(fig, y):
 
 # ---------------------------------------------------------------- 棒グラフ
 def bar_samples(long, labels, color_col, color_order, pal, ytitle, ref=None):
-    """サンプルごとの棒グラフ (x = label, 色 = 希釈など)。"""
+    """サンプルごとの棒グラフ (x = label, 色 = 希釈など)。化合物ごとにパネルを分け、各パネルにサンプル名を表示する。"""
     compounds = long[CPD_COL].unique().tolist()
-    fig = px.bar(
-        long, x=LABEL_COL, y=VALUE_COL, color=color_col, barmode="group",
-        facet_row=CPD_COL if len(compounds) > 1 else None,
-        category_orders={LABEL_COL: labels, color_col: color_order, CPD_COL: compounds},
-        color_discrete_map=color_map(color_order, pal),
-        hover_data={FILE_COL: True, "condition": True},
-        height=max(380, 260 * len(compounds)),
-    )
-    fig.update_yaxes(matches=None, title=None)
-    fig.for_each_annotation(lambda a: a.update(text=a.text.split("=")[-1]))
-    fig.update_layout(bargap=0.25, bargroupgap=0.08, barcornerradius=4, legend_title_text=color_col)
-    fig.update_layout(title=compounds[0] if len(compounds) == 1 else None)
-    if len(compounds) == 1:
-        fig.update_yaxes(title=ytitle)
+    n = len(compounds)
+    panel, gap = 240, 110  # 1 パネルの高さ / パネル間 (サンプル名とタイトルの分) の px
+    height = n * panel + (n - 1) * gap + 140
+    fig = make_subplots(rows=n, cols=1, subplot_titles=compounds, vertical_spacing=gap / height if n > 1 else 0)
+    colors = color_map(color_order, pal)
+    for r, cpd in enumerate(compounds, start=1):
+        d = long[long[CPD_COL] == cpd]
+        for g in color_order:
+            e = d[d[color_col] == g]
+            if e.empty:
+                continue
+            fig.add_trace(go.Bar(
+                x=e[LABEL_COL], y=e[VALUE_COL], name=g, legendgroup=g, showlegend=r == 1, marker_color=colors[g],
+                customdata=np.stack([e[FILE_COL], e["condition"]], axis=-1),
+                hovertemplate="%{x}<br>%{y:.4g}<br>%{customdata[1]}<br>%{customdata[0]}<extra>" + g + "</extra>",
+            ), row=r, col=1)
+        fig.update_xaxes(categoryorder="array", categoryarray=labels, tickangle=-60, tickfont_size=10, row=r, col=1)
+        fig.update_yaxes(title=ytitle if n == 1 else None, row=r, col=1)
+    for a in fig.layout.annotations:  # パネルのタイトル (化合物名) を左寄せに
+        a.update(x=0, xanchor="left", font_size=13)
+    fig.update_layout(barmode="group", bargap=0.25, bargroupgap=0.08, barcornerradius=4, height=max(380, height),
+                      legend_title_text=color_col, margin=dict(t=60))
     ref_line(fig, ref)
     return fig
 
