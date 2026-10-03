@@ -36,6 +36,19 @@ rm -rf .venv && uv sync
 uv run make_conc_table.py data/<ファイル名>.txt
 ```
 
+## デモ用の模擬データ (脂質)
+
+LC-MS/MS の定量結果と同じサンプルについて、脂質 6 項目 (肝臓 TG、血中 TG、総コレステロール、LDL-C、HDL-C、FFA) の
+**架空のデータ** を作れます。一部の項目を実測の代謝物 (BCAA、3-ヒドロキシ酪酸) と連動させているので、
+外部データの統合・相関・正準相関分析のデモに使えます。生成方法はスクリプトの先頭に書いてあります。
+
+```bash
+uv run scripts/make_demo_lipid.py data/20260925_Fujita.txt   # -> data/demo_lipid_simulated.csv
+```
+
+アプリでは 外部データ タブの「data/ から選択」で `demo_lipid_simulated.csv` を選び、変数グループ タブで
+「よく使う分類を追加」「外部データ・比をグループに追加」を押すと、正準相関 タブで アミノ酸 × 脂質 の解析ができます。
+
 ## パスワードの設定
 
 `.streamlit/secrets.toml.example` を `.streamlit/secrets.toml` にコピーしてパスワードを書きます。
