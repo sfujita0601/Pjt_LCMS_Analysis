@@ -264,7 +264,7 @@ with st.sidebar:
     st.caption(f"参考 (データからの診断): {diag['hint']} "
                f"[濃度/面積 の CV {diag['cv_external']:.2f}% ・ 濃度/(面積/IS 面積) の CV {diag['cv_internal']:.1f}%, "
                f"{diag['n_compounds']} 化合物]")
-    app_is = st.checkbox("アプリで IS 補正を行う", value=False, key="q_app_is",
+    app_is = st.checkbox("アプリで IS 補正を行う", value=True, key="q_app_is",
                          disabled=quant_method != lp.QM_EXTERNAL,
                          help="外部標準法のときだけ選べます (内部標準法なら LabSolutions で補正済みのため二重補正になる)。"
                               "係数 = 希釈グループ内の IS 平均 / 各ファイルの IS")
@@ -272,9 +272,9 @@ with st.sidebar:
     is_stage = c1.selectbox("IS の添加段階", lp.IS_STAGES, key="q_is_stage")
     is_conc_def = c2.text_input("IS 濃度の定義", value="", key="q_is_conc", placeholder="例: 抽出液中 10 µM")
     dilution_state = st.selectbox(
-        "希釈測定の倍率", lp.DILUTION_STATES, key="q_dil_state",
+        "希釈測定の倍率", lp.DILUTION_STATES, index=lp.DILUTION_STATES.index(lp.DIL_NOT_APPLIED), key="q_dil_state",
         help="x10 などの希釈測定で、LabSolutions の濃度に希釈倍率が既に掛かっているか。未設定の間は希釈の統合と倍率の適用をしません")
-    unit = st.text_input("濃度の単位 (LabSolutions)", value="未設定", key="q_unit", help="エクスポートに含まれないため設定してください")
+    unit = st.text_input("濃度の単位 (LabSolutions)", value="µM", key="q_unit", help="エクスポートに含まれないため設定してください")
     vol_on = st.checkbox("換算濃度 (元の血清中濃度) にする", value=True, key="q_vol_on",
                          help="LabSolutions の濃度はバイアル中 (測定液) の濃度。前処理の体積比を掛けて元の血清中濃度にします")
     preset = st.selectbox("試料 (出発血清量)", list(lp.SERUM_PRESETS), key="q_preset", disabled=not vol_on)
