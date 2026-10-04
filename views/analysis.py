@@ -18,8 +18,7 @@ from lcms_analysis import (
 from lcms_plots import bar_samples, bar_summary, clustered_heatmap, heatmap_grid, resolve_colormap, scale, scatter_2d
 from make_conc_table import FILE_COL, IS_NAME, LABEL_COL, MISSING, is_std
 from ui_common import (
-    colormap_select, colorscale_for, compound_picker, compound_select, figure_settings, reset_chart_counter, show_chart,
-    app_version, register_output, reset_outputs, theme, to_csv_bytes,
+    app_version, colormap_select, colorscale_for, compound_picker, compound_select, figure_settings, register_output, reset_chart_counter, reset_outputs, show_chart, significance_settings, theme, to_csv_bytes,
 )
 from ui_qc import accuracy_tab, calibration_choices, calibration_tab, drift_tab, provenance_tab, qc_tab
 from ui_external import cca_tab, external_tab, groups_tab, merge_external
@@ -332,6 +331,7 @@ with st.sidebar:
                             disabled=norm_method != ls.NORM_PQN)
 
 figure_settings()
+significance_settings()
 
 def fix_labels(df):
     if not harmonize or df is None:

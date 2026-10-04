@@ -267,3 +267,42 @@ def app_version():
     except Exception:
         pass
     return ver
+
+
+# ---------------------------------------------------------------- 有意水準 (p 値の閾値)
+def significance_settings():
+    """サイドバーの「有意水準」。各タブの閾値の初期値と、アスタリスクの区切りに使う。"""
+    with st.sidebar.expander("有意水準 (p 値の閾値)"):
+        st.number_input("有意水準 α (各タブの閾値の初期値)", 0.0001, 1.0, 0.05, 0.005, format="%.4f", key="sig_alpha",
+                        help="ボルケーノ・多群比較・二元配置 ANOVA・相関ネットワーク・ドリフトの判定で、閾値の初期値になります。"
+                             "各タブで個別に変えることもできます")
+        c1, c2, c3 = st.columns(3)
+        c1.number_input("*", 0.0, 1.0, 0.05, 0.005, format="%.4f", key="sig_star1")
+        c2.number_input("**", 0.0, 1.0, 0.01, 0.001, format="%.4f", key="sig_star2")
+        c3.number_input("***", 0.0, 1.0, 0.001, 0.0005, format="%.4f", key="sig_star3")
+        st.caption("アスタリスクは「補正後 p がこの値未満」で付けます。")
+        cut = star_cutoffs()
+        if not (cut[0] >= cut[1] >= cut[2]):
+            st.warning("* ≥ ** ≥ *** の順になるように設定してください")
+
+
+def alpha():
+    return float(st.session_state.get("sig_alpha", 0.05))
+
+
+def star_cutoffs():
+    ss = st.session_state
+    return float(ss.get("sig_star1", 0.05)), float(ss.get("sig_star2", 0.01)), float(ss.get("sig_star3", 0.001))
+
+
+def stars(p):
+    """補正後 p からアスタリスク (区切りはサイドバーで設定)。"""
+    if p is None or (isinstance(p, float) and np.isnan(p)):
+        return ""
+    s1, s2, s3 = star_cutoffs()
+    return "***" if p < s3 else "**" if p < s2 else "*" if p < s1 else ""
+
+
+def star_legend():
+    s1, s2, s3 = star_cutoffs()
+    return f"* 補正後 p < {s1:g}, ** < {s2:g}, *** < {s3:g}"

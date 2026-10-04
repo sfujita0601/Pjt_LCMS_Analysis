@@ -13,8 +13,7 @@ from lcms_analysis import COND_COL, GROUP_COL, natural_key
 from lcms_plots import PLOT_KINDS, color_map, group_plot, resolve_colormap, resolve_plot_kind, scale
 from make_conc_table import FILE_COL, LABEL_COL
 from ui_common import (
-    colormap_select, compound_picker, current_editor, register_output, reset_editor, show_chart, stable_editor,
-    to_csv_bytes,
+    alpha, colormap_select, compound_picker, current_editor, register_output, reset_editor, show_chart, stable_editor, star_legend, stars, to_csv_bytes,
 )
 
 LIM_COLORS = {qc.LIM_ND: "#e1e0d9", qc.LIM_LOD: "#e34948", qc.LIM_LOQ: "#eda100", qc.LIM_OK: "#2a78d6",
@@ -185,7 +184,7 @@ def add_brackets(fig, pairs, groups, ymax, pal, logy=False):
         fig.add_shape(type="path", line=dict(color=pal["line"], width=1),
                       path=f"M {x0},{conv(y - step * 0.3)} L {x0},{conv(y)} L {x1},{conv(y)} L {x1},{conv(y - step * 0.3)}")
         fig.add_annotation(x=(x0 + x1) / 2, y=conv(y) if not logy else y, yref="y", showarrow=False, yshift=8,
-                           text="***" if p < 0.001 else "**" if p < 0.01 else "*")
+                           text=stars(p) or f"q={p:.2g}")
     return fig
 
 
@@ -205,7 +204,7 @@ def multigroup_tab(base, groups, conds, compounds, pal, control=None):
     test = c1.selectbox("全体の検定", ls.MULTI_TESTS, key="mg_test",
                         help="ANOVA: 正規分布・等分散を仮定 / Welch: 等分散を仮定しない / Kruskal-Wallis: 順位に基づく")
     corr = c2.selectbox("化合物間の多重性補正", list(ls.CORRECTIONS), key="mg_corr")
-    q_thr = c3.number_input("補正後 p の閾値", 0.0, 1.0, 0.05, 0.01, format="%.3f", key="mg_q")
+    q_thr = c3.number_input("補正後 p の閾値", 0.0, 1.0, alpha(), 0.005, format="%.4f", key="mg_q")
     c1, c2, c3, c4 = st.columns(4)
     pairs_mode = c1.radio("事後検定の比較", [ls.PAIRS_ALL, ls.PAIRS_CONTROL], key="mg_pairs")
     ctrl = None
@@ -254,7 +253,7 @@ def multigroup_tab(base, groups, conds, compounds, pal, control=None):
     fig.update_layout(height=480, title=f"{cpd} ・ {test}: p = {row['p']:.3g} (補正後 {row['q']:.3g})",
                       yaxis_title=cpd, margin=dict(t=50))
     show_chart(c1, fig, width="stretch")
-    c1.caption(f"{kind}。* 補正後 p < 0.05, ** < 0.01, *** < 0.001 ({ph}"
+    c1.caption(f"{kind}。{star_legend()} ({ph}"
                + (f", {ph_corr}" if ph in ls.POSTHOC_NEEDS_ADJUST else "") + (f", 対照群 {ctrl}" if ctrl else "")
                + f")。閾値 {q_thr} 以下のペアのみ表示。")
     c2.dataframe(pw.round(5), hide_index=True)
@@ -266,7 +265,7 @@ COEF_MODE, ANOVA_MODE = "係数 (回帰係数)", "分散分析 (要因ごと)"
 
 
 def _stars(p):
-    return "" if pd.isna(p) else "***" if p < 0.001 else "**" if p < 0.01 else "*" if p < 0.05 else ""
+    return stars(p)
 
 
 def twoway_factor_editor(ds, labels, cond_map):
@@ -346,6 +345,7 @@ def twoway_tab(ds, base, groups, compounds, pal, labels, cond_map):
     typ = c3.radio("平方和", ["Type II", "Type III"], key="tw_typ", horizontal=True,
                    help="交互作用がある場合の主効果の定義が異なります。釣り合い型 (各セルの n が同じ) なら同じ結果")
     corr = c4.selectbox("化合物間の多重性補正", list(ls.CORRECTIONS), key="tw_corr")
+    q_thr = c2.number_input("補正後 p の閾値 (有意な数の集計)", 0.0, 1.0, alpha(), 0.005, format="%.4f", key="tw_q")
     sort = c1.selectbox("化合物の並び", ["入力順", "交互作用の p が小さい順", f"{name_a} の p が小さい順",
                                         f"{name_b} の p が小さい順"], key="tw_sort")
     with c4:
@@ -392,6 +392,8 @@ def twoway_tab(ds, base, groups, compounds, pal, labels, cond_map):
         title, zmid, zrange = stat, None, None
         cs = resolve_colormap(cmap, scale(pal["seq"]))
     M, P = M.reindex(index=rows, columns=order), P.reindex(index=rows, columns=order)
+    st.markdown("補正後 p ≤ " + f"{q_thr:g} の化合物の数: "
+                + " ・ ".join(f"**{r}**: {int((P.loc[r] <= q_thr).sum())}" for r in P.index))
     stars = P.map(_stars)
     fig = go.Figure(go.Heatmap(
         z=M.values, x=M.columns, y=M.index, text=stars.values, texttemplate="%{text}", textfont=dict(size=14),
@@ -405,7 +407,7 @@ def twoway_tab(ds, base, groups, compounds, pal, labels, cond_map):
     fig.update_layout(height=max(320, 60 * len(rows) + 220), title=title, margin=dict(l=160, b=160, t=60))
     show_chart(st, fig)
     p_label = "回帰係数の t 検定" if mode == COEF_MODE else f"分散分析 ({typ})"
-    st.caption(f"* 補正後 p < 0.05, ** < 0.01, *** < 0.001 ({p_label}, {corr}, 行ごとに化合物間で補正)。"
+    st.caption(f"{star_legend()} ({p_label}, {corr}, 行ごとに化合物間で補正)。"
                + ("主効果の係数は「もう一方の要因が基準水準のときの差」、交互作用の係数は「差の差」です。"
                   if mode == COEF_MODE else ""))
     if skipped:

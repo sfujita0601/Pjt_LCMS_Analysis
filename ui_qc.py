@@ -12,7 +12,7 @@ import lcms_stats as ls
 from lcms_analysis import COND_COL, natural_key
 from lcms_plots import color_map, scale
 from make_conc_table import DILUTION_COL, LABEL_COL, is_std
-from ui_common import current_editor, register_output, reset_editor, show_chart, stable_editor, to_csv_bytes
+from ui_common import alpha, current_editor, register_output, reset_editor, show_chart, stable_editor, to_csv_bytes
 
 CHOICES = [qc.CHOICE_AUTO, qc.CHOICE_AUTO_SAMPLE, qc.SRC_NONE, qc.SRC_DIL]
 
@@ -309,8 +309,10 @@ def drift_tab(full, is_name, pal, cond_map):
     if tbl.empty:
         return
     tbl["q (BH)"] = ls.adjust_p(tbl["p"], "fdr_bh").values
-    thr = st.slider("|ρ| の目安", 0.0, 1.0, 0.5, 0.05, key="drift_thr")
-    tbl["判定"] = np.where((tbl["Spearman ρ"].abs() >= thr) & (tbl["q (BH)"] <= 0.05), "ドリフトの疑い", "")
+    c1, c2 = st.columns(2)
+    thr = c1.slider("|ρ| の目安", 0.0, 1.0, 0.5, 0.05, key="drift_thr")
+    q_thr = c2.number_input("補正後 p (BH) の閾値", 0.0, 1.0, alpha(), 0.005, format="%.4f", key="drift_q")
+    tbl["判定"] = np.where((tbl["Spearman ρ"].abs() >= thr) & (tbl["q (BH)"] <= q_thr), "ドリフトの疑い", "")
     st.dataframe(tbl.sort_values("Spearman ρ", key=np.abs, ascending=False).round(4), hide_index=True, height=360)
     st.download_button("ドリフト指標 (CSV)", to_csv_bytes(tbl), "drift.csv", "text/csv", key="_dl_drift")
     if cond_map:

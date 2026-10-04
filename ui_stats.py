@@ -18,7 +18,7 @@ from lcms_analysis import COND_COL, GROUP_COL, log10_safe, natural_key
 from lcms_plots import color_map, resolve_colormap, scale
 from make_conc_table import LABEL_COL
 from lcms_plots import group_plot
-from ui_common import colormap_select, compound_picker, register_output, reset_editor, show_chart, stable_editor, symmetric_limit, to_csv_bytes
+from ui_common import alpha, colormap_select, compound_picker, register_output, reset_editor, show_chart, stable_editor, star_legend, symmetric_limit, to_csv_bytes
 
 UP, DOWN, NS = "増加", "減少", "有意差なし"
 
@@ -43,7 +43,7 @@ def volcano_tab(base, groups, conds, control, compounds, pal):
     log_test = c1.checkbox("t 検定は log2 値で行う", value=True, key="vol_log", disabled="t 検定" not in test and not test.startswith("対応"),
                            help="濃度は右に裾を引く分布になりやすいため、対数変換してから t 検定するのが一般的です")
     fc_thr = c2.number_input("|log2FC| の閾値", 0.0, 10.0, 1.0, 0.25, key="vol_fc")
-    q_thr = c3.number_input("補正後 p の閾値", 0.0, 1.0, 0.05, 0.01, format="%.3f", key="vol_q")
+    q_thr = c3.number_input("補正後 p の閾値", 0.0, 1.0, alpha(), 0.005, format="%.4f", key="vol_q")
     yaxis = c4.radio("縦軸", ["-log10(p)", "-log10(補正後 p)"], key="vol_y")
     n_lab = c5.number_input("ラベルを付ける上位数", 0, 100, 15, key="vol_nlab")
     compounds = compound_picker("vol", compounds)
@@ -101,7 +101,7 @@ def volcano_tab(base, groups, conds, control, compounds, pal):
                           title=f"{cpd} ・ {test}: p = {r['p']:.3g} (補正後 {r['q']:.3g}) ・ FC = {r['FC']:.3g}")
         c1, c2 = st.columns([2, 1])
         show_chart(c1, fig, width="stretch")
-        c2.caption(f"{kind}。* 補正後 p < 0.05, ** < 0.01, *** < 0.001 ({corr})。")
+        c2.caption(f"{kind}。{star_legend()} ({corr})。")
     return dict(group=group, treat=treat, control=control, res=res, q_thr=q_thr, test=test, corr=corr)
 
 
@@ -315,7 +315,7 @@ def correlation_tab(base, groups, conds, compounds, pal, vres):
     with t_net:
         c1, c2, c3, c4 = st.columns(4)
         r_min = c1.slider("|r| の下限", 0.0, 1.0, 0.7, 0.05, key="net_r")
-        q_max = c2.number_input("補正後 p の上限", 0.0, 1.0, 0.05, 0.01, format="%.3f", key="net_q")
+        q_max = c2.number_input("補正後 p の上限", 0.0, 1.0, alpha(), 0.005, format="%.4f", key="net_q")
         corr = c3.selectbox("多重性補正", [k for k in ls.CORRECTIONS], key="net_corr")
         color_by_fc = c4.checkbox("ノードを log2FC で色付け", value=vres is not None and vres["group"] == group,
                                   disabled=vres is None, key="net_fc",
