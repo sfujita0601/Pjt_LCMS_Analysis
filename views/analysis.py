@@ -16,10 +16,13 @@ from lcms_analysis import (
 )
 from lcms_plots import bar_samples, bar_summary, clustered_heatmap, heatmap_grid, resolve_colormap, scale, scatter_2d
 from make_conc_table import FILE_COL, IS_NAME, LABEL_COL, MISSING, is_std
-from ui_common import colormap_select, colorscale_for, compound_picker, compound_select, theme, to_csv_bytes
+from ui_common import (
+    colormap_select, colorscale_for, compound_picker, compound_select, figure_settings, reset_chart_counter, show_chart,
+    theme, to_csv_bytes,
+)
 from ui_qc import accuracy_tab, calibration_choices, calibration_tab, drift_tab, merged_table
 from ui_external import cca_tab, external_tab, groups_tab, merge_external
-from ui_extra import limits_tab, multigroup_tab, ratio_definitions, ratio_view
+from ui_extra import limits_tab, twoway_tab, multigroup_tab, ratio_definitions, ratio_view
 from ui_project import check_data, loader, saver
 from ui_stats import correlation_tab, kegg_tab, scatter_tab, volcano_tab
 
@@ -171,6 +174,7 @@ def summary_hover(summ, stat, index_col):
 
 # ================================================================ サイドバー
 st.title("LC-MS/MS 定量解析")
+reset_chart_counter()
 pal = theme()
 
 with st.sidebar:
@@ -245,6 +249,8 @@ with st.sidebar:
     pqn_total = st.checkbox("PQN の前に総量正規化 (Dieterle et al., 2006 の手順)", value=True, key="pqn_total",
                             disabled=norm_method != ls.NORM_PQN)
 
+figure_settings()
+
 def fix_labels(df):
     if not harmonize or df is None:
         return df
@@ -302,9 +308,9 @@ def make_base(d, cond_map, control, merged=None, used=None, cond_filter=None):
 def single_mode(d):
     tabs = st.tabs(["条件設定", "検量線・希釈", "STD 正確さ", "LOD・LOQ", "ドリフト", "テーブル", "代謝物比", "外部データ",
                     "変数グループ", "棒グラフ", "ヒートマップ", "散布図", "クラスタリング", "PCA", "UMAP", "ボルケーノ",
-                    "多群比較", "相関", "正準相関", "KEGG"])
+                    "多群比較", "二元配置 ANOVA", "相関", "正準相関", "KEGG"])
     (tab_cond, tab_cal, tab_acc, tab_lim, tab_drift, tab_tbl, tab_ratio, tab_ext, tab_grp, tab_bar, tab_hm, tab_sc,
-     tab_cl, tab_pca, tab_umap, tab_vol, tab_mg, tab_cor, tab_cca, tab_kegg) = tabs
+     tab_cl, tab_pca, tab_umap, tab_vol, tab_mg, tab_tw, tab_cor, tab_cca, tab_kegg) = tabs
     all_labels = sorted(d["raw"][LABEL_COL].unique(), key=la.natural_key)
 
     with tab_cond:
@@ -419,7 +425,7 @@ def single_mode(d):
                     st.warning("condition が入力されていません (条件設定タブ)")
                 else:
                     summ, pts = la.summary_values(df, sel, kind, control, stat, [GROUP_COL, COND_COL])
-                    st.plotly_chart(bar_summary(summ, pts, COND_COL, conds, GROUP_COL, groups, pal,
+                    show_chart(st, bar_summary(summ, pts, COND_COL, conds, GROUP_COL, groups, pal,
                                                 f"{ytitle} ({stat_label(stat)})", stat_label(stat), show_points,
                                                 ref_value(kind)), width="stretch")
                     st.caption(caption_for(kind, stat))
@@ -431,7 +437,7 @@ def single_mode(d):
                 long = vals.melt(id_vars=[FILE_COL, LABEL_COL, GROUP_COL, COND_COL], value_vars=sel,
                                  var_name=CPD_COL, value_name=VALUE_COL)
                 labels = list(dict.fromkeys(vals[LABEL_COL]))
-                st.plotly_chart(bar_samples(long, labels, GROUP_COL, groups, pal, ytitle, ref_value(kind)),
+                show_chart(st, bar_samples(long, labels, GROUP_COL, groups, pal, ytitle, ref_value(kind)),
                                 width="stretch")
                 st.caption("未検出 (-----) は棒なしで表示しています。"
                            + (" Fold Change の分母は同じ希釈グループの対照群平均です。" if kind != CONC else ""))
@@ -477,7 +483,7 @@ def single_mode(d):
             cs, title, mid, zr = colorscale_for(kind, pal, vals, limit, cmap)
             if by_cond:
                 title = f"{title}<br>({stat_label(stat)})"
-            st.plotly_chart(heatmap_grid(mats, cs, title, mid, zr, hovers or None), width="stretch")
+            show_chart(st, heatmap_grid(mats, cs, title, mid, zr, hovers or None), width="stretch")
             st.caption("空白セルは未検出 (または対照群で未検出)。Z スコアは希釈グループごとに化合物単位で計算しています。"
                        + (" " + caption_for(kind, stat) if by_cond else ""))
 
@@ -532,7 +538,7 @@ def single_mode(d):
             except ValueError as e:
                 st.error(f"{g}: {e}")
                 continue
-            st.plotly_chart(fig, width="stretch")
+            show_chart(st, fig, width="stretch")
             st.download_button(f"{g} の並べ替え後の行列 (CSV)", to_csv_bytes(M, index=True),
                                f"cluster_{g}.csv", "text/csv", key=f"_dl_cl_{g}")
 
@@ -551,7 +557,7 @@ def single_mode(d):
             ev = pca.explained_variance_ratio_ * 100
             a, b = min(pcx, n), min(pcy, n)
             with cols[i]:
-                st.plotly_chart(scatter_2d(
+                show_chart(st, scatter_2d(
                     scores, f"PC{a}", f"PC{b}", show_text, f"{g}  ({X.shape[0]} x {X.shape[1]})",
                     f"PC{a} ({ev[a - 1]:.1f}%)", f"PC{b} ({ev[b - 1]:.1f}%)", pal,
                     cond if conds else None, color_groups,
@@ -559,7 +565,7 @@ def single_mode(d):
                 ev_fig = go.Figure(go.Bar(x=scores.columns[:10], y=ev[:10], marker_color=pal["series"][0],
                                           hovertemplate="%{x}: %{y:.1f}%<extra></extra>"))
                 ev_fig.update_layout(title="寄与率 (%)", height=240, margin=dict(t=40, b=30), barcornerradius=4)
-                st.plotly_chart(ev_fig, width="stretch", key=f"ev_{g}")
+                show_chart(st, ev_fig, width="stretch", key=f"ev_{g}")
                 pcs = list(dict.fromkeys([a, b]))  # 横軸と縦軸に同じ PC を選んだ場合は 1 列だけ
                 load = pd.DataFrame(pca.components_[[k - 1 for k in pcs]].T, index=X.columns,
                                     columns=[f"PC{k}" for k in pcs])
@@ -583,7 +589,7 @@ def single_mode(d):
                 fig = scatter_2d(emb, "UMAP1", "UMAP2", show_text, f"{g}  ({X.shape[0]} x {X.shape[1]}, n_neighbors={nn})",
                                  "UMAP1", "UMAP2", pal, cond if conds else None, color_groups)
                 fig.update_xaxes(zeroline=False).update_yaxes(zeroline=False)  # UMAP 座標の 0 に意味はない
-                st.plotly_chart(fig, width="stretch", key=f"umap_{g}")
+                show_chart(st, fig, width="stretch", key=f"umap_{g}")
         st.caption("サンプル数が少ないため、UMAP の配置は n_neighbors や random_state で大きく変わります。")
 
     with tab_ratio:
@@ -592,6 +598,9 @@ def single_mode(d):
         vres = volcano_tab(base, groups, conds, control if has_control else None, compounds, pal)
     with tab_mg:
         multigroup_tab(base, groups, conds, compounds, pal, control if has_control else None)
+    with tab_tw:
+        twoway_tab(d["name"], base, groups, compounds, pal,
+                   [lb for lb in all_labels if not is_std(lb) and lb in used], cond_map)
     with tab_cor:
         correlation_tab(base, groups, conds, compounds, pal, vres)
     with tab_cca:
@@ -720,7 +729,7 @@ def multi_mode(datasets):
         if sel:
             s = summ[summ[CPD_COL].isin(sel)]
             p = points[points[CPD_COL].isin(sel)]
-            st.plotly_chart(bar_summary(s, p, COND_COL, x_order, DATASET_COL, used, pal,
+            show_chart(st, bar_summary(s, p, COND_COL, x_order, DATASET_COL, used, pal,
                                         f"{kind} ({stat_label(stat)})", stat_label(stat), show_points, ref_value(kind)),
                             width="stretch")
             st.caption(caption_for(kind, stat) + " 色 = データセット。")
@@ -740,7 +749,7 @@ def multi_mode(datasets):
             hovers[name] = summary_hover(s, stat, COND_COL).reindex(conds)
         vals = np.concatenate([m.values.ravel() for m in mats.values()])
         cs, title, mid, zr = colorscale_for(kind, pal, vals, limit, cmap)
-        st.plotly_chart(heatmap_grid(mats, cs, f"{title}<br>({stat_label(stat)})", mid, zr, hovers), width="stretch")
+        show_chart(st, heatmap_grid(mats, cs, f"{title}<br>({stat_label(stat)})", mid, zr, hovers), width="stretch")
         st.caption("パネル = データセット、列 = condition。空白は未検出 (または対照群で未検出)。"
                    "色の上限を超える値は端の色で表示されます (ツールチップには実際の値)。 " + caption_for(kind, stat))
 

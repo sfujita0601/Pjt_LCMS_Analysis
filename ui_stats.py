@@ -18,7 +18,7 @@ from lcms_analysis import COND_COL, GROUP_COL, log10_safe, natural_key
 from lcms_plots import color_map, resolve_colormap, scale
 from make_conc_table import LABEL_COL
 from lcms_plots import group_plot
-from ui_common import colormap_select, compound_picker, reset_editor, stable_editor, symmetric_limit, to_csv_bytes
+from ui_common import colormap_select, compound_picker, reset_editor, show_chart, stable_editor, symmetric_limit, to_csv_bytes
 
 UP, DOWN, NS = "増加", "減少", "有意差なし"
 
@@ -72,7 +72,7 @@ def volcano_tab(base, groups, conds, control, compounds, pal):
         fig.add_hline(y=-np.log10(q_thr), line=dict(color="#898781", width=1, dash="dot"))
     fig.update_layout(height=560, xaxis_title=f"log2 FC ({treat} / {control})", yaxis_title=yaxis,
                       title=f"{group} ・ {treat} vs {control} ・ {test} ・ {corr}", legend_title_text="")
-    st.plotly_chart(fig, width="stretch")
+    show_chart(st, fig, width="stretch")
     st.caption(f"FC = {treat} の平均 / {control} の平均。点線 = 閾値 (|log2FC| ≥ {fc_thr}, 補正後 p ≤ {q_thr})。"
                " どちらかの群で検出が 2 未満の化合物は検定せず除外しています。")
     out = res.drop(columns=["-log10"]).sort_values("p")
@@ -94,7 +94,7 @@ def volcano_tab(base, groups, conds, control, compounds, pal):
         fig.update_layout(height=440, yaxis_title=cpd, margin=dict(t=50),
                           title=f"{cpd} ・ {test}: p = {r['p']:.3g} (補正後 {r['q']:.3g}) ・ FC = {r['FC']:.3g}")
         c1, c2 = st.columns([2, 1])
-        c1.plotly_chart(fig, width="stretch")
+        show_chart(c1, fig, width="stretch")
         c2.caption(f"{kind}。* 補正後 p < 0.05, ** < 0.01, *** < 0.001 ({corr})。")
     return dict(group=group, treat=treat, control=control, res=res, q_thr=q_thr, test=test, corr=corr)
 
@@ -174,7 +174,7 @@ def scatter_tab(base, groups, conds, compounds, pal):
     fig.update_xaxes(title=x, type="log" if logx else "linear")
     fig.update_yaxes(title=y, type="log" if logy else "linear")
     fig.update_layout(height=560, title=title, legend_title_text="condition" if color_by == "condition" else "")
-    st.plotly_chart(fig, width="stretch")
+    show_chart(st, fig, width="stretch")
     st.caption("両方の化合物が検出されたサンプルだけを描いています。回帰直線は表示している軸のスケール (対数軸なら対数値) で当てはめています。")
 
     st.subheader("散布図行列")
@@ -208,7 +208,7 @@ def scatter_tab(base, groups, conds, compounds, pal):
         fig.update_xaxes(tickfont_size=9, nticks=4)
         fig.update_yaxes(tickfont_size=9, nticks=4)
         fig.update_layout(height=160 * n + 120, barmode="overlay", margin=dict(t=30))
-        st.plotly_chart(fig, width="stretch")
+        show_chart(st, fig, width="stretch")
         st.caption("対角 = 各化合物のヒストグラム。対数軸の設定は上の散布図と共通です。")
 
 
@@ -272,7 +272,7 @@ def correlation_tab(base, groups, conds, compounds, pal, vres):
         fig.update_xaxes(tickangle=-90, tickfont_size=9)
         size = max(600, 14 * len(order) + 220)
         fig.update_layout(height=size, margin=dict(l=200, b=200, t=30))
-        st.plotly_chart(fig, width="stretch")
+        show_chart(st, fig, width="stretch")
         st.download_button("相関係数の行列 (CSV)", to_csv_bytes(R, index=True), "correlation.csv", "text/csv", key="_dl_cor")
 
     with t_net:
@@ -319,7 +319,7 @@ def correlation_tab(base, groups, conds, compounds, pal, vres):
         fig.update_xaxes(visible=False)
         fig.update_yaxes(visible=False, scaleanchor="x")
         fig.update_layout(height=700, legend=dict(orientation="h", y=1.02), margin=dict(t=40))
-        st.plotly_chart(fig, width="stretch")
+        show_chart(st, fig, width="stretch")
         st.caption(f"エッジ {len(edges)} 本 (赤 = 正の相関, 青 = 負の相関)・ノードの大きさ = 次数。"
                    "配置は spring layout (Fruchterman-Reingold, seed 固定)。相関は因果関係を意味しません (Camacho et al., 2005)。")
         st.dataframe(edges.round(5), hide_index=True, height=300)
@@ -428,7 +428,7 @@ def kegg_tab(all_compounds, vres, pal):
     fig.update_xaxes(range=[0, W], visible=False)
     fig.update_yaxes(range=[H, 0], visible=False, scaleanchor="x")
     fig.update_layout(width=W, height=H, margin=dict(l=0, r=0, t=30, b=0), title=f"{pid} {title}")
-    st.plotly_chart(fig, width="content")
+    show_chart(st, fig, width="content")
     st.caption(f"丸の色 = log2FC ({vres['treat']} / {vres['control']}, {vres['group']})、太い黒枠 = 補正後 p ≤ {vres['q_thr']}。"
                f" 経路図 © Kanehisa Laboratories. 詳細: https://www.kegg.jp/pathway/{pid}"
                " 論文などに経路図を掲載する場合は KEGG の利用条件 (https://www.kegg.jp/kegg/legal.html) を確認してください。")

@@ -12,7 +12,7 @@ import lcms_stats as ls
 from lcms_analysis import COND_COL, natural_key
 from lcms_plots import color_map, scale
 from make_conc_table import DILUTION_COL, LABEL_COL, is_std
-from ui_common import current_editor, reset_editor, stable_editor, to_csv_bytes
+from ui_common import current_editor, reset_editor, show_chart, stable_editor, to_csv_bytes
 
 CHOICES = [qc.CHOICE_AUTO, qc.CHOICE_AUTO_SAMPLE, qc.SRC_NONE, qc.SRC_DIL]
 
@@ -122,7 +122,7 @@ def dilution_linearity_section(raw, compounds, factor):
                                  hovertemplate="%{text}<br>希釈なし %{x:.4g}<br>希釈測定 x 倍率 %{y:.4g}<extra></extra>"))
         fig.update_layout(height=360, xaxis_title="希釈なし", yaxis_title=f"希釈測定 x {factor:g}", title=cpd,
                           showlegend=False, margin=dict(t=40))
-        st.plotly_chart(fig, width="stretch")
+        show_chart(st, fig, width="stretch")
 
 
 # ---------------------------------------------------------------- STD の正確さ
@@ -160,7 +160,7 @@ def accuracy_tab(full, pal):
     fig.update_yaxes(autorange="reversed", tickfont_size=10)
     fig.update_layout(height=max(400, 16 * len(cpds) + 160), margin=dict(l=220, t=30),
                       title="STD ごとの正確さ (%) ・ 色の範囲 50–150% (100% が中央)")
-    st.plotly_chart(fig, width="stretch")
+    show_chart(st, fig, width="stretch")
 
     st.subheader("検量線")
     cpd = st.selectbox("化合物", cpds, key="acc_cpd")
@@ -183,7 +183,7 @@ def accuracy_tab(full, pal):
     fig.update_yaxes(title="算出濃度", row=1, col=1)
     fig.update_yaxes(title="面積", row=1, col=2)
     fig.update_layout(height=420)
-    st.plotly_chart(fig, width="stretch")
+    show_chart(st, fig, width="stretch")
 
 
 # ---------------------------------------------------------------- ドリフト
@@ -233,7 +233,7 @@ def drift_tab(full, is_name, pal, cond_map):
             fig.update_yaxes(title=value, row=r, col=1)
         fig.update_xaxes(title="測定順", row=len(sel), col=1)
         fig.update_layout(height=max(380, 280 * len(sel)), legend_title_text=key)
-        st.plotly_chart(fig, width="stretch")
+        show_chart(st, fig, width="stretch")
         st.caption("破線 = サンプルの値に当てはめた回帰直線 (希釈グループ別)。")
 
     st.subheader("全化合物のドリフト指標")

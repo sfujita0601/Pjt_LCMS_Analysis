@@ -164,6 +164,19 @@ k(k−1)/2 から k−1 に減るぶん検出力が上がります。ANOVA の�
 スチューデント化範囲分布で群の組み合わせの多重性を調整済みで、Dunn 検定と 2 群検定の繰り返しには
 Holm などの補正をかけます。全体の検定が有意でない化合物の事後検定は、探索的な参考値として扱ってください。
 
+### 二元配置分散分析 (二元配置 ANOVA タブ)
+
+2 つの要因 (例: 食餌 × 薬剤) とその交互作用を、化合物ごとに次のモデルで検定します。
+""")
+st.latex(r"y = \mu + \alpha_i + \beta_j + (\alpha\beta)_{ij} + \varepsilon")
+st.markdown("""
+- **交互作用** $(\alpha\beta)_{ij}$ は「一方の要因の効果が、もう一方の要因の水準によって変わるか」を表します (交互作用の図で線が平行でない)
+- **平方和の種類**: 各組み合わせのサンプル数が同じ (釣り合い型) なら Type II と Type III は一致します。釣り合っていない場合、
+  交互作用が無ければ Type II の方が検出力が高く、交互作用がある場合の主効果の解釈は慎重に行う必要があります [36]
+- **回帰係数** (ヒートマップの既定) は処理コーディングで求めます。主効果の係数は「もう一方の要因が基準水準のときの、
+  基準水準との差」、交互作用の係数は「差の差」です。log2 変換していれば、それぞれ log2 FC とその差になります
+- 全化合物を同時に検定するので、要因 (行) ごとに化合物間の多重性補正をかけます
+
 ### 検定と一緒に載せる図
 
 慣習的には、平均を比べる検定 (t 検定・ANOVA) には 平均 ± SD (または SEM) の棒グラフ、
@@ -294,4 +307,5 @@ st.markdown("""
 33. Vinod HD. Canonical ridge and econometrics of joint production. *J Econom*. 1976;4(2):147–166.
 34. González I, Déjean S, Martin PGP, Baccini A. CCA: an R package to extend canonical correlation analysis. *J Stat Softw*. 2008;23(12):1–14.
 35. Winkler AM, Renaud O, Smith SM, Nichols TE. Permutation inference for canonical correlation analysis. *NeuroImage*. 2020;220:117065. doi:10.1016/j.neuroimage.2020.117065
+36. Langsrud Ø. ANOVA for unbalanced data: use Type II instead of Type III sums of squares. *Stat Comput*. 2003;13(2):163–167.
 """)

@@ -69,7 +69,8 @@ yamada = "パスワード1"
 3. 「Advanced settings」で Python のバージョンを **3.12 以上** (既定の 3.12 のままで可) にし、Secrets に `password = "..."` を貼り付けて Deploy
 4. Secrets を設定し忘れた場合、アプリは起動を止めてその旨を表示します (誰でも使える状態にはなりません)
 
-ライブラリは `uv.lock` (または `requirements.txt`) から入ります。`pyproject.toml` を変えたときは、次のコマンドで
+ライブラリは `uv.lock` (または `requirements.txt`) から入ります。図を PDF などで保存する機能 (kaleido) は Chromium を使うため、
+`packages.txt` で Chromium と日本語フォント (fonts-noto-cjk) も入れています。`pyproject.toml` を変えたときは、次のコマンドで
 `requirements.txt` も更新してください。
 
 ```bash

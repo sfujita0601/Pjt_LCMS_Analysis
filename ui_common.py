@@ -121,3 +121,114 @@ def compound_picker(key, compounds, label="対象の化合物"):
     if mode == PICK_EXCLUDE:
         return [c for c in compounds if c not in sel]
     return list(compounds)
+
+
+# ---------------------------------------------------------------- 図の表示・保存
+FONTS = ["既定", "Arial", "Helvetica", "Times New Roman", "Noto Sans JP", "Hiragino Sans", "Yu Gothic", "Meiryo",
+         "その他 (入力)"]
+SAVE_FORMATS = {"PNG": "png", "PDF": "pdf", "SVG": "svg", "JPEG": "jpeg"}
+_chart_count = [0]
+
+
+def figure_settings():
+    """サイドバーの「図の設定」。値は session_state に入り、show_chart が参照する。"""
+    with st.sidebar.expander("図の設定 (フォント・背景・保存)"):
+        font = st.selectbox("フォント", FONTS, key="fig_font",
+                            help="日本語を含むラベルには Noto Sans JP / Hiragino Sans などの日本語フォントを選んでください")
+        if font == "その他 (入力)":
+            st.text_input("フォント名", key="fig_font_custom", placeholder="例: Source Han Sans")
+        c1, c2 = st.columns(2)
+        c1.number_input("軸ラベルの大きさ (0 = 既定)", 0, 48, 0, key="fig_title_size")
+        c2.number_input("目盛り数字の大きさ (0 = 既定)", 0, 48, 0, key="fig_tick_size")
+        c1.number_input("凡例の大きさ (0 = 既定)", 0, 48, 0, key="fig_legend_size")
+        c2.number_input("図タイトルの大きさ (0 = 既定)", 0, 48, 0, key="fig_head_size")
+        st.radio("画面の背景", ["テーマに合わせる", "白"], key="fig_bg", horizontal=True)
+        st.divider()
+        st.selectbox("保存形式", list(SAVE_FORMATS), key="fig_format",
+                     help="各図の「図を保存」で使う形式。PDF・SVG は拡大しても劣化しないベクター形式")
+        st.radio("保存時の背景", ["白", "透明", "画面と同じ"], key="fig_save_bg", horizontal=True)
+        st.number_input("解像度の倍率 (PNG・JPEG)", 1, 6, 3, key="fig_scale")
+
+
+def _font_family():
+    ss = st.session_state
+    f = ss.get("fig_font", "既定")
+    if f == "その他 (入力)":
+        f = ss.get("fig_font_custom") or "既定"
+    return None if f == "既定" else f
+
+
+def style_figure(fig):
+    """フォントの種類と大きさ・背景を図に反映する (0 / 既定 の項目は変えない)。"""
+    ss = st.session_state
+    family = _font_family()
+    if family:
+        fig.update_layout(font_family=family)
+    ts, ks = ss.get("fig_title_size", 0), ss.get("fig_tick_size", 0)
+    for upd in (fig.update_xaxes, fig.update_yaxes):
+        if ts:
+            upd(title_font_size=ts)
+        if ks:
+            upd(tickfont_size=ks)
+    if ks:
+        fig.update_coloraxes(colorbar_tickfont_size=ks)
+        fig.update_traces(colorbar_tickfont_size=ks, selector=dict(type="heatmap"))
+    if ss.get("fig_legend_size", 0):
+        fig.update_layout(legend_font_size=ss["fig_legend_size"])
+    if ss.get("fig_head_size", 0):
+        fig.update_layout(title_font_size=ss["fig_head_size"])
+        fig.update_annotations(font_size=ss["fig_head_size"])  # サブプロットのタイトル
+    return fig
+
+
+def _white(fig):
+    return fig.update_layout(template="plotly_white", paper_bgcolor="white", plot_bgcolor="white",
+                             font_color="#0b0b0b")
+
+
+def export_figure(fig, fmt, background="白", scale=3):
+    """図を画像・PDF のバイト列にする (kaleido を使う)。"""
+    import plotly.graph_objects as go
+
+    out = go.Figure(fig)
+    if background == "白":
+        _white(out)
+    elif background == "透明":
+        out.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
+    width = out.layout.width or 1100
+    height = out.layout.height or 500
+    return out.to_image(format=fmt, width=width, height=height, scale=scale if fmt in ("png", "jpeg") else 1)
+
+
+def show_chart(container, fig, key=None, width="stretch", **kwargs):
+    """st.plotly_chart の代わり: 図の設定を反映して表示し、「図を保存」を付ける。"""
+    ss = st.session_state
+    _chart_count[0] += 1
+    key = key or f"chart{_chart_count[0]}"
+    style_figure(fig)
+    white = ss.get("fig_bg") == "白"
+    if white:
+        _white(fig)
+    fmt_name = ss.get("fig_format", "PNG")
+    fmt = SAVE_FORMATS[fmt_name]
+    title = fig.layout.title.text if fig.layout.title and fig.layout.title.text else key
+    fname = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in str(title))[:60] or "figure"
+    config = {"displaylogo": False,
+              "toImageButtonOptions": {"format": fmt if fmt in ("png", "svg", "jpeg") else "png",
+                                       "filename": fname, "scale": ss.get("fig_scale", 3)}}
+    container.plotly_chart(fig, width=width, key=key, config=config, theme=None if white else "streamlit", **kwargs)
+    with container.popover(f"図を保存 ({fmt_name})", icon=":material/download:"):
+        st.caption("形式・背景・解像度はサイドバーの「図の設定」で変えられます。")
+        if st.button("作成", key=f"_btn_save_{key}"):
+            try:
+                ss[f"_img_{key}"] = export_figure(fig, fmt, ss.get("fig_save_bg", "白"), ss.get("fig_scale", 3))
+            except Exception as e:  # Chrome が無い環境など
+                ss.pop(f"_img_{key}", None)
+                st.error(f"画像を作成できません: {e} (図の右上のカメラのボタンでも PNG / SVG で保存できます)")
+        data = ss.get(f"_img_{key}")
+        if data:
+            st.download_button(f"{fname}.{fmt} をダウンロード", data, f"{fname}.{fmt}", key=f"_dl_save_{key}")
+
+
+def reset_chart_counter():
+    _chart_count[0] = 0

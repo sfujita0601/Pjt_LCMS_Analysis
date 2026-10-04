@@ -1,4 +1,5 @@
 """正規化・スケーリング・群間検定・相関解析。根拠となる文献は views/docs.py (解析手法の解説) を参照。"""
+import re
 import warnings
 
 import numpy as np
@@ -447,3 +448,69 @@ def cca(X, Y, reg=0.0, n_perm=999, seed=0, loo=True):
     return dict(r=r, p=pvals, r_loo=r_loo, U=U, V=V, A=A, B=B,
                 load_x=corr_with(Xs, U), load_y=corr_with(Ys, V),
                 cross_x=corr_with(Xs, V), cross_y=corr_with(Ys, U))
+
+
+# ---------------------------------------------------------------- 二元配置分散分析
+def _pretty_term(name, label_a, label_b):
+    """statsmodels の係数名 (C(A, Treatment(...))[T.x]:C(B, ...)[T.y]) を「A: x」「A×B: x×y」にする。"""
+    parts = name.split(":")
+    levels = [re.search(r"\[T\.(.*)\]$", p).group(1) if re.search(r"\[T\.(.*)\]$", p) else p for p in parts]
+    factors = [label_a if p.startswith("C(A") else label_b for p in parts]
+    return f"{'×'.join(factors)}: {'×'.join(levels)}"
+
+
+def twoway_anova(df, compounds, label_a="要因A", label_b="要因B", log=True, typ=2, ref_a=None, ref_b=None):
+    """化合物ごとに 二元配置分散分析 (交互作用あり: y ~ A + B + A:B) を行う。
+
+    df は列 "A", "B" (要因の水準) と化合物の列を持つ。log=True なら log2 変換した値で行う。
+    - 分散分析表: typ=2 (Type II, 処理コーディングで計算) / typ=3 (Type III, 効果コーディングで計算)
+    - 係数: 処理コーディング (基準水準 ref_a, ref_b) の回帰係数。主効果の係数は「もう一方の要因が基準水準のときの差」、
+      交互作用の係数は「差の差」(log2 なら log2 FC の差)
+    戻り値: (分散分析の long 表, 係数の long 表, 解析できなかった化合物と理由)
+    """
+    import statsmodels.formula.api as smf
+    from statsmodels.stats.anova import anova_lm
+
+    terms = {"A": label_a, "B": label_b, "A:B": f"{label_a}×{label_b}"}
+    anova_rows, coef_rows, skipped = [], [], []
+    for cpd in compounds:
+        d = pd.DataFrame({"y": pd.to_numeric(df[cpd], errors="coerce"), "A": df["A"].astype(str),
+                          "B": df["B"].astype(str)}).dropna()
+        if log:
+            d["y"] = log2_safe(d["y"])
+            d = d.dropna()
+        na, nb = d["A"].nunique(), d["B"].nunique()
+        cells = d.groupby(["A", "B"]).size()
+        if na < 2 or nb < 2:
+            skipped.append((cpd, "水準が 2 つ未満"))
+            continue
+        if len(cells) < na * nb:
+            skipped.append((cpd, "データの無い組み合わせ (セル) がある"))
+            continue
+        if len(d) - na * nb < 1 or d["y"].nunique() < 2:
+            skipped.append((cpd, "誤差の自由度が無い (各セルに 2 つ以上の値が必要)"))
+            continue
+        ra = ref_a if ref_a in set(d["A"]) else sorted(d["A"].unique())[0]
+        rb = ref_b if ref_b in set(d["B"]) else sorted(d["B"].unique())[0]
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            tr = smf.ols(f"y ~ C(A, Treatment(reference={ra!r})) * C(B, Treatment(reference={rb!r}))", d).fit()
+            if typ == 3:
+                tbl = anova_lm(smf.ols("y ~ C(A, Sum) * C(B, Sum)", d).fit(), typ=3)
+            else:
+                tbl = anova_lm(tr, typ=2)
+        ss_res = tbl.loc["Residual", "sum_sq"]
+        for raw_name, key in zip(tbl.index, tbl.index):
+            if raw_name in ("Intercept", "Residual"):
+                continue
+            t = "A:B" if ":" in raw_name else ("A" if raw_name.startswith("C(A") else "B")
+            ss = tbl.loc[raw_name, "sum_sq"]
+            anova_rows.append({"化合物": cpd, "要因": terms[t], "F": tbl.loc[raw_name, "F"],
+                               "p": tbl.loc[raw_name, "PR(>F)"], "偏η²": ss / (ss + ss_res),
+                               "自由度": tbl.loc[raw_name, "df"], "n": len(d)})
+        for name in tr.params.index:
+            if name == "Intercept":
+                continue
+            coef_rows.append({"化合物": cpd, "係数": _pretty_term(name, label_a, label_b),
+                              "値": tr.params[name], "標準誤差": tr.bse[name], "p": tr.pvalues[name], "n": len(d)})
+    return pd.DataFrame(anova_rows), pd.DataFrame(coef_rows), skipped

@@ -12,7 +12,7 @@ import lcms_stats as ls
 from lcms_analysis import COND_COL, GROUP_COL
 from lcms_plots import color_map, resolve_colormap, scale
 from make_conc_table import LABEL_COL, is_std
-from ui_common import colormap_select, current_editor, reset_editor, stable_editor, to_csv_bytes
+from ui_common import colormap_select, current_editor, reset_editor, show_chart, stable_editor, to_csv_bytes
 from ui_project import sha256
 
 GROUPS_KEY = "var_groups"
@@ -247,7 +247,7 @@ def cca_tab(base, groups, dil_groups, conds, pal):
                            text=[f"p={v:.3f}" if pd.notna(v) else "" for v in tbl["並べ替え検定 p"][:10]],
                            textposition="outside", hovertemplate="%{x}: r = %{y:.3f}<extra></extra>"))
     fig.update_layout(height=320, yaxis=dict(range=[0, 1.1], title="正準相関"), margin=dict(t=20), barcornerradius=4)
-    c2.plotly_chart(fig, width="stretch")
+    show_chart(c2, fig, width="stretch")
 
     st.subheader("正準変量の散布図")
     c1, c2 = st.columns([1, 1])
@@ -266,7 +266,7 @@ def cca_tab(base, groups, dil_groups, conds, pal):
                                  hovertemplate="%{text}<br>X 側 %{x:.3f}<br>Y 側 %{y:.3f}<extra>" + c + "</extra>"))
     fig.update_layout(height=460, xaxis_title=f"{gx} の正準変量 CV{comp}", yaxis_title=f"{gy} の正準変量 CV{comp}",
                       title=f"CV{comp}: r = {res['r'][comp - 1]:.3f}")
-    st.plotly_chart(fig, width="stretch")
+    show_chart(st, fig, width="stretch")
 
     st.subheader("変数の寄与 (構造相関)")
     lx_, ly_ = pd.DataFrame(res["load_x"], index=X.columns), pd.DataFrame(res["load_y"], index=Y.columns)
@@ -284,7 +284,7 @@ def cca_tab(base, groups, dil_groups, conds, pal):
         fig.update_xaxes(range=[-1.1, 1.1], title="正準変量 CV1 との相関", zeroline=True)
         fig.update_yaxes(range=[-1.1, 1.1], title="正準変量 CV2 との相関", zeroline=True, scaleanchor="x")
         fig.update_layout(height=620, title="相関円 (各変数と自分の側の正準変量との相関)")
-        st.plotly_chart(fig, width="stretch")
+        show_chart(st, fig, width="stretch")
         st.caption("外側の円の近くにある変数ほど、その成分への寄与が大きい。X と Y の変数が同じ方向にあれば正の関係。"
                    "点線の円は |相関| = 0.5。")
     load = pd.concat([
@@ -310,6 +310,6 @@ def cca_tab(base, groups, dil_groups, conds, pal):
     fig.update_yaxes(autorange="reversed", tickfont_size=9)
     fig.update_xaxes(tickangle=-90, tickfont_size=9)
     fig.update_layout(height=max(400, 14 * p + 200), margin=dict(l=200, b=160, t=20))
-    c2.plotly_chart(fig, width="stretch")
+    show_chart(c2, fig, width="stretch")
     c2.download_button("相関行列 (CSV)", to_csv_bytes(Rxy, index=True), "cca_cross_correlation.csv", "text/csv",
                        key="_dl_cca_r")

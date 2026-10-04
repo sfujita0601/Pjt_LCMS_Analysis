@@ -10,9 +10,11 @@ import lcms_analysis as la
 import lcms_qc as qc
 import lcms_stats as ls
 from lcms_analysis import COND_COL, GROUP_COL, natural_key
-from lcms_plots import PLOT_KINDS, group_plot, resolve_plot_kind
+from lcms_plots import PLOT_KINDS, color_map, group_plot, resolve_colormap, resolve_plot_kind, scale
 from make_conc_table import FILE_COL, LABEL_COL
-from ui_common import compound_picker, current_editor, reset_editor, stable_editor, to_csv_bytes
+from ui_common import (
+    colormap_select, compound_picker, current_editor, reset_editor, show_chart, stable_editor, to_csv_bytes,
+)
 
 LIM_COLORS = {qc.LIM_ND: "#e1e0d9", qc.LIM_LOD: "#e34948", qc.LIM_LOQ: "#eda100", qc.LIM_OK: "#2a78d6",
               qc.LIM_UNK: "#9ec5f4"}
@@ -60,7 +62,7 @@ def limits_tab(full, pal, mask_info):
     fig.update_xaxes(tickangle=-90, tickfont_size=9)
     fig.update_layout(height=max(450, 14 * len(cpds) + 200), margin=dict(l=220, t=30),
                       title="各測定の区分 (列 = 測定順)")
-    st.plotly_chart(fig, width="stretch")
+    show_chart(st, fig, width="stretch")
 
     st.subheader("化合物ごとの濃度と限界値")
     c1, c2 = st.columns([3, 1])
@@ -83,7 +85,7 @@ def limits_tab(full, pal, mask_info):
     fig.update_xaxes(categoryorder="array", categoryarray=list(d["表示名"]), tickangle=-90, tickfont_size=9)
     fig.update_yaxes(type="log" if logy else "linear", title="濃度 (装置の算出値)")
     fig.update_layout(height=460, title=cpd, legend_title_text="")
-    st.plotly_chart(fig, width="stretch")
+    show_chart(st, fig, width="stretch")
     st.caption("横棒 = 測定ごとの LOQ (実線の記号) と LOD。未検出・評価不可の測定は限界値が無いため棒を描きません。")
 
 
@@ -152,7 +154,7 @@ def ratio_view(base, ratios, groups, conds, pal, na_rep):
     for i, r in enumerate(sel):
         fig = group_plot(sub, r, COND_COL, cats, LABEL_COL, pal, kind, pts, logy)
         fig.update_layout(height=380, title=r, yaxis_title=r, margin=dict(t=40))
-        cols[i % len(cols)].plotly_chart(fig, width="stretch", key=f"ratio_fig_{i}")
+        show_chart(cols[i % len(cols)], fig, width="stretch", key=f"ratio_fig_{i}")
     st.caption("箱ひげ図: 箱 = 中央値と四分位、ひげ = 1.5 IQR。点 = 各サンプル。"
                "サイドバーではなくこのタブの「比を他の解析にも追加」をオンにすると、棒グラフ・ボルケーノなどでも化合物と同様に扱えます。")
 
@@ -249,9 +251,174 @@ def multigroup_tab(base, groups, conds, compounds, pal, control=None):
     row = res[res["化合物"] == cpd].iloc[0]
     fig.update_layout(height=480, title=f"{cpd} ・ {test}: p = {row['p']:.3g} (補正後 {row['q']:.3g})",
                       yaxis_title=cpd, margin=dict(t=50))
-    c1.plotly_chart(fig, width="stretch")
+    show_chart(c1, fig, width="stretch")
     c1.caption(f"{kind}。* 補正後 p < 0.05, ** < 0.01, *** < 0.001 ({ph}"
                + (f", {ph_corr}" if ph in ls.POSTHOC_NEEDS_ADJUST else "") + (f", 対照群 {ctrl}" if ctrl else "")
                + f")。閾値 {q_thr} 以下のペアのみ表示。")
     c2.dataframe(pw.round(5), hide_index=True)
     c2.download_button("事後検定 (CSV)", to_csv_bytes(pw), f"posthoc_{cpd}.csv", "text/csv", key="_dl_ph")
+
+
+# ---------------------------------------------------------------- 二元配置分散分析
+COEF_MODE, ANOVA_MODE = "係数 (回帰係数)", "分散分析 (要因ごと)"
+
+
+def _stars(p):
+    return "" if pd.isna(p) else "***" if p < 0.001 else "**" if p < 0.01 else "*" if p < 0.05 else ""
+
+
+def twoway_factor_editor(ds, labels, cond_map):
+    """label ごとに 2 つの要因の水準を入力する表。({label: (A, B)}, 要因 A の名前, 要因 B の名前)"""
+    key = f"twoway::{ds}"
+    c1, c2, c3, c4 = st.columns([2, 2, 1, 2])
+    name_a = c1.text_input("要因 A の名前", value="要因A", key=f"tw_name_a::{ds}")
+    name_b = c2.text_input("要因 B の名前", value="要因B", key=f"tw_name_b::{ds}")
+    sep = c3.text_input("区切り文字", value="_", key=f"tw_sep::{ds}", max_chars=3)
+    c4.write("")
+    split = c4.button("condition を区切り文字で分けて入力", key=f"_btn_tw_split::{ds}",
+                      help="例: condition が「HFD_Drug」なら 要因A = HFD、要因B = Drug")
+
+    def from_condition():
+        rows = []
+        for lb in labels:
+            parts = str(cond_map.get(lb, "")).split(sep, 1) if sep else [cond_map.get(lb, "")]
+            rows.append({LABEL_COL: lb, "要因A": parts[0] if len(parts) == 2 else "",
+                         "要因B": parts[1] if len(parts) == 2 else ""})
+        return pd.DataFrame(rows)
+
+    init = pd.DataFrame({LABEL_COL: labels, "要因A": [""] * len(labels), "要因B": [""] * len(labels)})
+    if split:
+        reset_editor(key, from_condition())
+        st.rerun()
+    edited = stable_editor(key, init, hide_index=True, num_rows="fixed", disabled=[LABEL_COL],
+                           height=min(400, 36 * (len(labels) + 1)),
+                           column_config={"要因A": st.column_config.TextColumn(name_a or "要因A"),
+                                          "要因B": st.column_config.TextColumn(name_b or "要因B")})
+    factors = {}
+    for _, r in edited.iterrows():
+        a, b = str(r.get("要因A") or "").strip(), str(r.get("要因B") or "").strip()
+        if a and b:
+            factors[r[LABEL_COL]] = (a, b)
+    return factors, (name_a or "要因A").strip(), (name_b or "要因B").strip()
+
+
+def twoway_tab(ds, base, groups, compounds, pal, labels, cond_map):
+    st.caption("2 つの要因 (例: 食餌 × 薬剤) とその交互作用を、化合物ごとに 二元配置分散分析 で検定します。"
+               "各サンプルの要因の水準を下の表に入力してください (condition を「HFD_Drug」のように付けていれば分割して入力できます)。")
+    with st.expander("要因の設定", expanded=True):
+        factors, name_a, name_b = twoway_factor_editor(ds, labels, cond_map)
+    lv_a = sorted({a for a, _ in factors.values()}, key=natural_key)
+    lv_b = sorted({b for _, b in factors.values()}, key=natural_key)
+    if len(lv_a) < 2 or len(lv_b) < 2:
+        st.info("2 つの要因それぞれに 2 つ以上の水準を入力してください。")
+        return
+    c1, c2, c3, c4 = st.columns(4)
+    group = c1.selectbox("希釈グループ", groups, key="tw_group")
+    ref_a = c2.selectbox(f"{name_a} の基準水準", lv_a, key="tw_ref_a", help="係数はこの水準との差になります")
+    ref_b = c3.selectbox(f"{name_b} の基準水準", lv_b, key="tw_ref_b")
+    log = c4.checkbox("log2 変換した値で行う", value=True, key="tw_log",
+                      help="濃度は右に裾を引くため対数変換を推奨。係数は log2 の差 (= log2 FC) になります")
+    cpds = compound_picker("tw", compounds)
+    c1, c2, c3, c4 = st.columns(4)
+    mode = c1.radio("ヒートマップの値", [COEF_MODE, ANOVA_MODE], key="tw_mode")
+    stat = c2.selectbox("分散分析の値", ["偏η²", "F", "-log10(補正後 p)"], key="tw_stat", disabled=mode != ANOVA_MODE)
+    typ = c3.radio("平方和", ["Type II", "Type III"], key="tw_typ", horizontal=True,
+                   help="交互作用がある場合の主効果の定義が異なります。釣り合い型 (各セルの n が同じ) なら同じ結果")
+    corr = c4.selectbox("化合物間の多重性補正", list(ls.CORRECTIONS), key="tw_corr")
+    sort = c1.selectbox("化合物の並び", ["入力順", "交互作用の p が小さい順", f"{name_a} の p が小さい順",
+                                        f"{name_b} の p が小さい順"], key="tw_sort")
+    with c4:
+        cmap = colormap_select("tw_cmap")
+
+    sub = base[(base[GROUP_COL] == group) & base[LABEL_COL].isin(factors)].copy()
+    sub["A"] = sub[LABEL_COL].map(lambda lb: factors[lb][0])
+    sub["B"] = sub[LABEL_COL].map(lambda lb: factors[lb][1])
+    cells = sub.groupby(["A", "B"]).size().unstack(fill_value=0).reindex(index=lv_a, columns=lv_b, fill_value=0)
+    with st.expander("各組み合わせのサンプル数"):
+        st.dataframe(cells.rename_axis(index=name_a, columns=name_b))
+    anova, coefs, skipped = ls.twoway_anova(sub, cpds, name_a, name_b, log, 3 if typ == "Type III" else 2, ref_a, ref_b)
+    if anova.empty:
+        st.warning("解析できる化合物がありません" + (f" (例: {skipped[0][0]}: {skipped[0][1]})" if skipped else ""))
+        return
+    method = ls.CORRECTIONS[corr]
+    anova["補正後 p"] = anova.groupby("要因")["p"].transform(lambda p: ls.adjust_p(p, method).values)
+    coefs["補正後 p"] = coefs.groupby("係数")["p"].transform(lambda p: ls.adjust_p(p, method).values)
+
+    order = list(dict.fromkeys(anova["化合物"]))
+    term_ab, term_a, term_b = f"{name_a}×{name_b}", name_a, name_b
+    key_term = {"交互作用の p が小さい順": term_ab, f"{name_a} の p が小さい順": term_a,
+                f"{name_b} の p が小さい順": term_b}.get(sort)
+    if key_term:
+        order = list(anova[anova["要因"] == key_term].sort_values("p")["化合物"])
+
+    if mode == COEF_MODE:
+        M = coefs.pivot(index="係数", columns="化合物", values="値")
+        P = coefs.pivot(index="係数", columns="化合物", values="補正後 p")
+        rows = list(dict.fromkeys(coefs["係数"]))
+        unit = "log2 の差" if log else "差"
+        title = f"回帰係数 ({unit}、基準: {name_a} = {ref_a}, {name_b} = {ref_b})"
+        zmid, finite = 0, M.values[np.isfinite(M.values)]
+        m = float(np.percentile(np.abs(finite), 98)) if finite.size else 1.0
+        zrange, cs = (-m, m), resolve_colormap(cmap, scale(pal["div"]))
+    else:
+        val = {"偏η²": "偏η²", "F": "F"}.get(stat)
+        A = anova.assign(v=anova[val] if val else -np.log10(anova["補正後 p"]))
+        M = A.pivot(index="要因", columns="化合物", values="v")
+        P = anova.pivot(index="要因", columns="化合物", values="補正後 p")
+        rows = [term_a, term_b, term_ab]
+        title, zmid, zrange = stat, None, None
+        cs = resolve_colormap(cmap, scale(pal["seq"]))
+    M, P = M.reindex(index=rows, columns=order), P.reindex(index=rows, columns=order)
+    stars = P.map(_stars)
+    fig = go.Figure(go.Heatmap(
+        z=M.values, x=M.columns, y=M.index, text=stars.values, texttemplate="%{text}", textfont=dict(size=14),
+        colorscale=cs, zmid=zmid, zmin=zrange[0] if zrange else None, zmax=zrange[1] if zrange else None,
+        xgap=1, ygap=1, customdata=P.values,
+        colorbar=dict(title=("係数<br>(log2)" if log else "係数") if mode == COEF_MODE else stat),
+        hovertemplate="%{x}<br>%{y}<br>値 %{z:.3g}<br>補正後 p %{customdata:.3g}<extra></extra>",
+    ))
+    fig.update_yaxes(autorange="reversed")
+    fig.update_xaxes(tickangle=-60, tickfont_size=10)
+    fig.update_layout(height=max(320, 60 * len(rows) + 220), title=title, margin=dict(l=160, b=160, t=60))
+    show_chart(st, fig)
+    p_label = "回帰係数の t 検定" if mode == COEF_MODE else f"分散分析 ({typ})"
+    st.caption(f"* 補正後 p < 0.05, ** < 0.01, *** < 0.001 ({p_label}, {corr}, 行ごとに化合物間で補正)。"
+               + ("主効果の係数は「もう一方の要因が基準水準のときの差」、交互作用の係数は「差の差」です。"
+                  if mode == COEF_MODE else ""))
+    if skipped:
+        st.caption("解析できなかった化合物: " + ", ".join(f"{c} ({r})" for c, r in skipped[:10])
+                   + (" ..." if len(skipped) > 10 else ""))
+
+    t1, t2 = st.tabs(["分散分析表", "回帰係数"])
+    with t1:
+        st.dataframe(anova.round(5), hide_index=True, height=300)
+        st.download_button("分散分析表 (CSV)", to_csv_bytes(anova), "twoway_anova.csv", "text/csv", key="_dl_tw_a")
+    with t2:
+        st.dataframe(coefs.round(5), hide_index=True, height=300)
+        st.download_button("回帰係数 (CSV)", to_csv_bytes(coefs), "twoway_coefficients.csv", "text/csv", key="_dl_tw_c")
+
+    st.subheader("交互作用の図")
+    cpd = st.selectbox("化合物", order, key="tw_cpd")
+    d = sub.dropna(subset=[cpd])
+    summ = d.groupby(["A", "B"])[cpd].agg(["mean", "std", "count"]).reset_index()
+    summ["se"] = summ["std"] / np.sqrt(summ["count"])
+    cmap_b = color_map(lv_b, pal)
+    fig = go.Figure()
+    for b in lv_b:
+        s = summ[summ["B"] == b].set_index("A").reindex(lv_a)
+        fig.add_trace(go.Scatter(x=lv_a, y=s["mean"], mode="lines+markers", name=b, line=dict(color=cmap_b[b], width=2),
+                                 marker=dict(size=9), error_y=dict(type="data", array=s["se"], thickness=1.5, width=6),
+                                 hovertemplate=f"{name_b} = {b}<br>%{{x}}<br>平均 %{{y:.4g}}<extra></extra>"))
+        pts = d[d["B"] == b]
+        fig.add_trace(go.Scatter(x=pts["A"], y=pts[cpd], mode="markers", showlegend=False, text=pts[LABEL_COL],
+                                 marker=dict(size=6, color=cmap_b[b], opacity=0.45),
+                                 hovertemplate="%{text}<br>%{y:.4g}<extra></extra>"))
+    rows_c = anova[anova["化合物"] == cpd].set_index("要因")
+    sub_title = " ・ ".join(f"{t}: p = {rows_c.loc[t, 'p']:.3g}" for t in rows_c.index)
+    fig.update_xaxes(title=name_a, categoryorder="array", categoryarray=lv_a)
+    fig.update_yaxes(title=cpd)
+    fig.update_layout(height=440, title=f"{cpd}<br><sup>{sub_title}</sup>", legend_title_text=name_b,
+                      margin=dict(t=80))
+    show_chart(st, fig)
+    st.caption("点 = 平均 ± 標準誤差 (薄い点は各サンプル)。線が平行でなければ交互作用があることを示します。"
+               "図は変換前の値、検定は" + ("log2 変換した値" if log else "そのままの値") + "です。")
