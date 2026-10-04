@@ -283,21 +283,28 @@ def twoway_factor_editor(ds, labels, cond_map):
         for lb in labels:
             parts = str(cond_map.get(lb, "")).split(sep, 1) if sep else [cond_map.get(lb, "")]
             rows.append({LABEL_COL: lb, "要因A": parts[0] if len(parts) == 2 else "",
-                         "要因B": parts[1] if len(parts) == 2 else ""})
+                         "要因B": parts[1] if len(parts) == 2 else "", "使用": True})
         return pd.DataFrame(rows)
 
-    init = pd.DataFrame({LABEL_COL: labels, "要因A": [""] * len(labels), "要因B": [""] * len(labels)})
+    init = pd.DataFrame({LABEL_COL: labels, "要因A": [""] * len(labels), "要因B": [""] * len(labels),
+                         "使用": [True] * len(labels)})
+    cur = current_editor(key)
+    if cur is not None and "使用" not in cur:  # 以前の版で作った表には「使用」列が無い
+        reset_editor(key, cur.assign(使用=True))
     if split:
         reset_editor(key, from_condition())
         st.rerun()
     edited = stable_editor(key, init, hide_index=True, num_rows="fixed", disabled=[LABEL_COL],
                            height=min(400, 36 * (len(labels) + 1)),
                            column_config={"要因A": st.column_config.TextColumn(name_a or "要因A"),
-                                          "要因B": st.column_config.TextColumn(name_b or "要因B")})
+                                          "要因B": st.column_config.TextColumn(name_b or "要因B"),
+                                          "使用": st.column_config.CheckboxColumn(
+                                              "使用", help="チェックを外したサンプルは二元配置 ANOVA に使いません")})
     factors = {}
     for _, r in edited.iterrows():
         a, b = str(r.get("要因A") or "").strip(), str(r.get("要因B") or "").strip()
-        if a and b:
+        use = r.get("使用", True)
+        if a and b and (use is None or pd.isna(use) or bool(use)):
             factors[r[LABEL_COL]] = (a, b)
     return factors, (name_a or "要因A").strip(), (name_b or "要因B").strip()
 
@@ -307,11 +314,23 @@ def twoway_tab(ds, base, groups, compounds, pal, labels, cond_map):
                "各サンプルの要因の水準を下の表に入力してください (condition を「HFD_Drug」のように付けていれば分割して入力できます)。")
     with st.expander("要因の設定", expanded=True):
         factors, name_a, name_b = twoway_factor_editor(ds, labels, cond_map)
-    lv_a = sorted({a for a, _ in factors.values()}, key=natural_key)
-    lv_b = sorted({b for _, b in factors.values()}, key=natural_key)
-    if len(lv_a) < 2 or len(lv_b) < 2:
+    all_a = sorted({a for a, _ in factors.values()}, key=natural_key)
+    all_b = sorted({b for _, b in factors.values()}, key=natural_key)
+    if len(all_a) < 2 or len(all_b) < 2:
         st.info("2 つの要因それぞれに 2 つ以上の水準を入力してください。")
         return
+    st.markdown("**解析対象のデータ**")
+    c1, c2 = st.columns(2)
+    lv_a = c1.multiselect(f"使う {name_a} の水準", all_a, default=all_a, key="tw_lv_a")
+    lv_b = c2.multiselect(f"使う {name_b} の水準", all_b, default=all_b, key="tw_lv_b")
+    lv_a = [v for v in all_a if v in lv_a]
+    lv_b = [v for v in all_b if v in lv_b]
+    if len(lv_a) < 2 or len(lv_b) < 2:
+        st.warning("それぞれの要因で 2 つ以上の水準を選んでください。")
+        return
+    factors = {lb: ab for lb, ab in factors.items() if ab[0] in lv_a and ab[1] in lv_b}
+    st.caption(f"解析に使うサンプル: {len(factors)} 個 (要因の設定表の「使用」と、上の水準の選択で絞り込めます)。"
+               "解析する化合物は下の「対象の化合物」で選べます。")
     c1, c2, c3, c4 = st.columns(4)
     group = c1.selectbox("希釈グループ", groups, key="tw_group")
     ref_a = c2.selectbox(f"{name_a} の基準水準", lv_a, key="tw_ref_a", help="係数はこの水準との差になります")
@@ -338,7 +357,9 @@ def twoway_tab(ds, base, groups, compounds, pal, labels, cond_map):
         st.dataframe(cells.rename_axis(index=name_a, columns=name_b))
     anova, coefs, skipped = ls.twoway_anova(sub, cpds, name_a, name_b, log, 3 if typ == "Type III" else 2, ref_a, ref_b)
     if anova.empty:
-        st.warning("解析できる化合物がありません" + (f" (例: {skipped[0][0]}: {skipped[0][1]})" if skipped else ""))
+        st.warning("解析できる化合物がありません" + (f" (例: {skipped[0][0]}: {skipped[0][1]})" if skipped else "")
+                   + "。データの無い組み合わせがある場合は、「使う水準」でその水準を外してください"
+                   " (二元配置分散分析では、すべての 要因A × 要因B の組み合わせにデータが必要です)。")
         return
     method = ls.CORRECTIONS[corr]
     anova["補正後 p"] = anova.groupby("要因")["p"].transform(lambda p: ls.adjust_p(p, method).values)

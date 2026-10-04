@@ -103,6 +103,27 @@ def volcano_tab(base, groups, conds, control, compounds, pal):
 UNSET_COND = "未設定"
 
 
+def make_square(fig, xs, ys, logx, logy, size):
+    """描画領域を正方形にする (x 軸と y 軸の長さをそろえる)。
+
+    軸の範囲を明示し、縦横の目盛りの比をデータ範囲の比に合わせて固定する (scaleanchor)。
+    こうすると画面の幅によらず、描画領域は高さ size に合わせた正方形になる。
+    """
+    def span(v, log):
+        v = np.asarray(v, dtype=float)
+        v = np.log10(v[v > 0]) if log else v[np.isfinite(v)]
+        lo, hi = float(v.min()), float(v.max())
+        pad = (hi - lo) * 0.08 or (abs(hi) * 0.1 or 1.0)
+        return lo - pad, hi + pad
+
+    (x0, x1), (y0, y1) = span(xs, logx), span(ys, logy)
+    fig.update_xaxes(range=[x0, x1], constrain="domain")
+    fig.update_yaxes(range=[y0, y1], scaleanchor="x", scaleratio=(x1 - x0) / (y1 - y0), constrain="domain")
+    # 凡例は下に置き、横幅を正方形の描画領域に使えるようにする
+    fig.update_layout(height=size + 170, legend=dict(orientation="h", y=-0.18, x=0, yanchor="top"),
+                      margin=dict(t=70, b=120))
+
+
 def _fit_line(x, y, logx, logy):
     """表示している軸のスケールで直線を当てはめ、描画用の (xs, ys) を返す。"""
     tx = np.log10(x) if logx else x
@@ -136,6 +157,9 @@ def scatter_tab(base, groups, conds, compounds, pal):
     method = c4.selectbox("相関係数", ["Spearman", "Pearson"], key="sc_method",
                           help="対数軸のときは Pearson も対数値で計算します")
     labels_on = c5.checkbox("ラベルを表示", value=True, key="sc_lab")
+    c1, c2 = st.columns([1, 2])
+    square = c1.checkbox("x 軸と y 軸を同じ長さにする (正方形)", value=True, key="sc_square")
+    size = c2.slider("図の大きさ (px)", 300, 1000, 560, 20, key="sc_size", disabled=not square)
 
     sub = base[base[GROUP_COL] == group].copy()
     sub[COND_COL] = sub[COND_COL].replace("", UNSET_COND)
@@ -174,6 +198,8 @@ def scatter_tab(base, groups, conds, compounds, pal):
     fig.update_xaxes(title=x, type="log" if logx else "linear")
     fig.update_yaxes(title=y, type="log" if logy else "linear")
     fig.update_layout(height=560, title=title, legend_title_text="condition" if color_by == "condition" else "")
+    if square:
+        make_square(fig, d[x], d[y], logx, logy, size)
     show_chart(st, fig, width="stretch")
     st.caption("両方の化合物が検出されたサンプルだけを描いています。回帰直線は表示している軸のスケール (対数軸なら対数値) で当てはめています。")
 
@@ -207,8 +233,13 @@ def scatter_tab(base, groups, conds, compounds, pal):
             fig.update_xaxes(title_text=xj, title_font_size=10, row=n, col=j)
         fig.update_xaxes(tickfont_size=9, nticks=4)
         fig.update_yaxes(tickfont_size=9, nticks=4)
-        fig.update_layout(height=160 * n + 120, barmode="overlay", margin=dict(t=30))
-        show_chart(st, fig, width="stretch")
+        if square:  # 各パネルを正方形に: 図全体の幅と高さをそろえて、幅は固定で表示する
+            side = max(160 * n + 120, size)
+            fig.update_layout(height=side, width=side, barmode="overlay", margin=dict(t=30, l=70, r=30, b=60))
+            show_chart(st, fig, width="content")
+        else:
+            fig.update_layout(height=160 * n + 120, barmode="overlay", margin=dict(t=30))
+            show_chart(st, fig, width="stretch")
         st.caption("対角 = 各化合物のヒストグラム。対数軸の設定は上の散布図と共通です。")
 
 
