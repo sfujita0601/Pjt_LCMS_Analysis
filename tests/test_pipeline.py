@@ -218,3 +218,36 @@ def test_settings_roundtrip(monkeypatch):
     assert restored["q_method"] == lp.QM_EXTERNAL and restored["q_vol"] == 10.0
     assert restored["data_pick"] == Path("data/x.txt")
     assert restored["cond_init::ds"]["condition"].tolist() == ["A"]
+
+
+# ---------------------------------------------------------------- 換算濃度 (バイアル中濃度 -> 元の血清中濃度)
+def test_conversion_factor_presets():
+    const = lp.CONV_CONST_DEFAULT
+    assert lp.conversion_factor(const, 50) == pytest.approx(200 * 380 / 280 * 170 / 130 / 50)  # ラット
+    assert lp.conversion_factor(const, 25) == pytest.approx(200 * 380 / 280 * 170 / 130 / 25)  # マウス
+    with pytest.raises(ValueError):
+        lp.eval_expression("__import__('os')")
+
+
+def test_converted_concentration_with_per_sample_override(data):
+    full, raw, cpds, rng = data
+    rat = lp.conversion_factor(lp.CONV_CONST_DEFAULT, 50)
+    mouse = lp.conversion_factor(lp.CONV_CONST_DEFAULT, 25)
+    s = lp.QuantSettings(dilution_state=lp.DIL_NOT_APPLIED, volume_factor=rat, volume_by_label={"S-3": mouse})
+    res = lp.run(full, raw, cpds, s, rng)
+    r1 = val(res, "20260101_S-1_1_010.lcd", "AA2")
+    assert r1["最終値"] == pytest.approx(5.0 * rat) and r1["最終値の意味"] == "換算濃度"
+    r3 = val(res, "20260101_S-3_3_014.lcd", "AA2")
+    assert r3["最終値"] == pytest.approx(7.0 * mouse)
+    # 換算濃度にするときは、希釈測定の倍率も換算に含める (LabSolutions で未適用と設定した場合)
+    rx = val(res, "20260101_S-1 x10_1_011.lcd", "AA2")
+    assert rx["希釈係数"] == 10.0 and rx["最終値"] == pytest.approx(0.5 * 10 * rat)
+
+
+def test_converted_concentration_flags_unconverted_dilution(data):
+    full, raw, cpds, rng = data
+    s = lp.QuantSettings(volume_factor=7.0)  # 希釈測定の倍率は未設定
+    res = lp.run(full, raw, cpds, s, rng)
+    rx = val(res, "20260101_S-1 x10_1_011.lcd", "AA2")
+    assert rx["希釈係数"] == 1.0 and "換算濃度ではない" in rx["最終値の意味"]
+    assert any("換算濃度になっていません" in n for n in res.notes)

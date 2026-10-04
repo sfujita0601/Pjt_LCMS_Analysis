@@ -33,6 +33,41 @@ DIL_APPLIED = "LabSolutions で適用済み"
 DILUTION_STATES = [DIL_UNSET, DIL_NOT_APPLIED, DIL_APPLIED]
 
 IS_STAGES = ["未設定", "前処理の前 (試料に添加)", "前処理の後 (抽出液に添加)", "測定の直前", "その他"]
+
+# 換算濃度 (バイアル中濃度 -> 元の血清中濃度) の式: 換算係数 = 定数部分 x 1 / 出発血清量 (µL)
+# 定数部分は前処理の体積比 (200 x 380/280 x 170/130)。出発血清量は動物種で異なる
+CONV_CONST_DEFAULT = "200 * 380 / 280 * 170 / 130"
+SERUM_PRESETS = {
+    "ラット (血清 50 µL)": 50.0,
+    "マウス (血清 25 µL + 水 25 µL)": 25.0,
+    "カスタム": None,
+}
+
+
+def eval_expression(text):
+    """四則演算だけの式を評価する (例: "200 * 380 / 280")。それ以外の構文はエラーにする。"""
+    import ast
+    import operator
+
+    ops = {ast.Add: operator.add, ast.Sub: operator.sub, ast.Mult: operator.mul, ast.Div: operator.truediv}
+
+    def ev(node):
+        if isinstance(node, ast.Expression):
+            return ev(node.body)
+        if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
+            return float(node.value)
+        if isinstance(node, ast.BinOp) and type(node.op) in ops:
+            return ops[type(node.op)](ev(node.left), ev(node.right))
+        if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
+            return -ev(node.operand)
+        raise ValueError("数値と + - * / ( ) だけが使えます")
+
+    return ev(ast.parse(str(text), mode="eval"))
+
+
+def conversion_factor(const_expr, serum_ul):
+    """換算係数 = 定数部分 / 出発血清量。"""
+    return eval_expression(const_expr) / float(serum_ul)
 REINJECT_FIRST, REINJECT_MEAN = "平均しない (最初に測定した値を採用)", "平均する"
 
 # 値の状態
@@ -54,8 +89,9 @@ class QuantSettings:
     is_stage: str = "未設定"
     is_conc_def: str = ""           # IS の濃度の定義 (自由記述)
     dilution_state: str = DIL_UNSET
-    volume_factor: float | None = None  # 前処理による体積換算 (None = 未設定)
+    volume_factor: float | None = None  # 前処理による体積換算 (None = 換算しない)
     volume_def: str = ""
+    volume_by_label: dict = field(default_factory=dict)  # 試料ごとの換算係数 (出発血清量を個別に指定した場合)
     unit: str = "未設定"            # LabSolutions の濃度の単位 (エクスポートに含まれないため利用者が設定)
     consistency_tol: float = 20.0   # 希釈間の一致の許容 (%)
     reinjection: str = REINJECT_FIRST
@@ -70,12 +106,17 @@ class QuantSettings:
         """最終値の意味 (表や図の説明に使う)。"""
         if normalized:
             return "正規化後の相対値 (濃度ではない)"
-        base = "元の血清・血漿中濃度" if self.volume_factor else "測定液中濃度"
+        base = "換算濃度 (元の血清中濃度)" if self.volume_factor else "バイアル中濃度 (測定液中濃度)"
         parts = [base]
         if self.is_applied():
             parts.append("IS 補正後")
         unit = f"単位: {self.unit}" if self.unit and self.unit != "未設定" else "単位: 未設定"
         return " / ".join(parts) + f" ({unit})"
+
+    def vol_for(self, label):
+        if not self.volume_factor:
+            return 1.0
+        return float(self.volume_by_label.get(label, self.volume_factor))
 
     def to_dict(self):
         return asdict(self)
@@ -204,11 +245,12 @@ def run(full, raw, compounds, settings, ranges, choices=None, merge=False, mult_
             notes.append("IS 補正は行いません: LabSolutions で内部標準法を使用済みのため (二重補正の防止)")
         elif settings.app_is and settings.quant_method == QM_UNSET:
             notes.append("IS 補正は行いません: 定量方式が未設定のため")
-    # 希釈係数を掛けるか
-    apply_dil = settings.dilution_state == DIL_NOT_APPLIED and (merge or mult_dilution)
-    if (merge or mult_dilution) and settings.dilution_state == DIL_UNSET:
-        notes.append("希釈係数の適用状態が未設定のため、希釈倍率は掛けていません")
-    vol = float(settings.volume_factor) if settings.volume_factor else 1.0
+    # 希釈係数を掛けるか (換算濃度にする場合は、希釈測定の倍率も換算に含める)
+    converting = bool(settings.volume_factor)
+    apply_dil = settings.dilution_state == DIL_NOT_APPLIED and (merge or mult_dilution or converting)
+    if (merge or mult_dilution or converting) and settings.dilution_state == DIL_UNSET:
+        notes.append("希釈測定の倍率 (LabSolutions で適用済みか) が未設定のため、希釈測定の値に倍率を掛けていません。"
+                     + ("希釈測定の行は換算濃度になっていません" if converting else ""))
 
     # 再注入 (同じ label・同じ希釈の複数ファイル)
     order = full.drop_duplicates("file").set_index("file")["datetime"]
@@ -228,10 +270,17 @@ def run(full, raw, compounds, settings, ranges, choices=None, merge=False, mult_
             r = r.iloc[0]
         return r["conc"], r["状態"], r["理由"]
 
-    def convert(file, conc, dilution):
+    def convert(file, conc, dilution, label):
         f_is = float(isf.get(file, np.nan)) if settings.is_applied() else 1.0
         f_dil = dilution_factor_of(dilution) if apply_dil else 1.0
-        return conc * f_is * f_dil * vol, f_is, f_dil
+        return conc * f_is * f_dil * settings.vol_for(label), f_is, f_dil
+
+    def meaning(dilution, f_dil):
+        if not converting:
+            return "バイアル中濃度"
+        if dilution and f_dil == 1.0 and settings.dilution_state != DIL_APPLIED:
+            return "換算濃度ではない (希釈倍率が未換算)"
+        return "換算濃度"
 
     if not merge:
         rows = []
@@ -241,13 +290,14 @@ def run(full, raw, compounds, settings, ranges, choices=None, merge=False, mult_
             row = {FILE_COL: fr[FILE_COL], LABEL_COL: fr[LABEL_COL], DILUTION_COL: fr[DILUTION_COL]}
             for c in compounds:
                 conc, stt, why = value_of(fr[FILE_COL], c)
-                val, f_is, f_dil = convert(fr[FILE_COL], conc, fr[DILUTION_COL])
+                val, f_is, f_dil = convert(fr[FILE_COL], conc, fr[DILUTION_COL], fr[LABEL_COL])
                 if stt in exclude_status:
                     val = np.nan
                 row[c] = val
                 prov_rows.append({LABEL_COL: fr[LABEL_COL], "行": fr[FILE_COL], "化合物": c, "採用した測定": fr[FILE_COL],
                                   "希釈": fr[DILUTION_COL] or "希釈なし", "入力値": conc, "IS 係数": f_is,
-                                  "希釈係数": f_dil, "体積換算係数": vol, "最終値": val, "状態": stt, "理由": why,
+                                  "希釈係数": f_dil, "体積換算係数": settings.vol_for(fr[LABEL_COL]), "最終値": val,
+                                  "最終値の意味": meaning(fr[DILUTION_COL], f_dil), "状態": stt, "理由": why,
                                   "採用しなかった測定": ""})
             rows.append(row)
         values = pd.DataFrame(rows)
@@ -301,11 +351,12 @@ def run(full, raw, compounds, settings, ranges, choices=None, merge=False, mult_
                         stt, why = ST_REMEASURE, "採用できる測定が無い (" + other_txt + ")"
                     row[c] = np.nan
                     prov_rows.append({LABEL_COL: lb, "行": lb, "化合物": c, "採用した測定": "", "希釈": "",
-                                      "入力値": np.nan, "IS 係数": np.nan, "希釈係数": np.nan, "体積換算係数": vol,
-                                      "最終値": np.nan, "状態": stt, "理由": why, "採用しなかった測定": other_txt})
+                                      "入力値": np.nan, "IS 係数": np.nan, "希釈係数": np.nan,
+                                      "体積換算係数": settings.vol_for(lb), "最終値": np.nan, "最終値の意味": "",
+                                      "状態": stt, "理由": why, "採用しなかった測定": other_txt})
                     continue
                 f_, dl, conc, stt, why = adopted
-                val, f_is, f_dil = convert(f_, conc, dl)
+                val, f_is, f_dil = convert(f_, conc, dl, lb)
                 # 希釈間の一致 (両方が検量範囲内で採用可能なとき)
                 if pd.notna(cu[0]) and pd.notna(cd[0]) and cu[1] in (ST_OK, ST_CHECK) and cd[1] in (ST_OK, ST_CHECK) \
                         and settings.dilution_state == DIL_NOT_APPLIED and cu[0] > 0:
@@ -317,8 +368,9 @@ def run(full, raw, compounds, settings, ranges, choices=None, merge=False, mult_
                     val = np.nan
                 row[c] = val
                 prov_rows.append({LABEL_COL: lb, "行": lb, "化合物": c, "採用した測定": f_, "希釈": dl or "希釈なし",
-                                  "入力値": conc, "IS 係数": f_is, "希釈係数": f_dil, "体積換算係数": vol, "最終値": val,
-                                  "状態": stt, "理由": why, "採用しなかった測定": other_txt})
+                                  "入力値": conc, "IS 係数": f_is, "希釈係数": f_dil, "体積換算係数": settings.vol_for(lb),
+                                  "最終値": val, "最終値の意味": meaning(dl, f_dil), "状態": stt, "理由": why,
+                                  "採用しなかった測定": other_txt})
             rows.append(row)
         values = pd.DataFrame(rows, columns=[FILE_COL, LABEL_COL, DILUTION_COL] + list(compounds))
 
@@ -388,8 +440,22 @@ def _apply_mask(values, prov, full, compounds, level, repl, merge):
 
 
 # ---------------------------------------------------------------- 試料のメタデータと生物学的 n
-TYPE_COL, SUBJECT_COL, TIME_COL = "試料種別", "個体ID", "時点"
-META_COLS = [TYPE_COL, SUBJECT_COL, TIME_COL, "実験回", "前処理バッチ", "測定バッチ"]
+TYPE_COL, SUBJECT_COL, TIME_COL, SERUM_COL = "試料種別", "個体ID", "時点", "血清量 (µL)"
+META_COLS = [TYPE_COL, SUBJECT_COL, TIME_COL, SERUM_COL, "実験回", "前処理バッチ", "測定バッチ"]
+
+
+def volume_overrides(meta, const_expr):
+    """条件設定の「血清量 (µL)」が入力された試料の換算係数 {label: 係数}。"""
+    out = {}
+    if meta is None or SERUM_COL not in meta:
+        return out
+    for lb, v in meta[SERUM_COL].items():
+        try:
+            if str(v).strip():
+                out[lb] = conversion_factor(const_expr, float(v))
+        except (ValueError, ZeroDivisionError):
+            pass
+    return out
 T_SAMPLE, T_STD = "試料", "検量線 STD"
 SAMPLE_TYPES = [T_SAMPLE, "既知濃度 QC", "プール QC", "溶媒ブランク", "処理ブランク", "キャリーオーバー確認ブランク", T_STD]
 
@@ -403,8 +469,8 @@ def apply_metadata(base, meta, compounds):
     m[TYPE_COL] = m[TYPE_COL].fillna(T_SAMPLE)
     m[SUBJECT_COL] = [s_ if isinstance(s_, str) and s_ else lb for lb, s_ in zip(base[LABEL_COL], m[SUBJECT_COL])]
     base = base.copy()
-    for c in META_COLS:
-        base[c] = m[c].fillna("").values
+    for c in META_COLS:  # 以前の版の表に無い列は空欄にする
+        base[c] = m[c].fillna("").values if c in m else ""
     n_other = int((base[TYPE_COL] != T_SAMPLE).sum())
     base = base[base[TYPE_COL] == T_SAMPLE]
     keys = [GROUP_COL, SUBJECT_COL, TIME_COL]

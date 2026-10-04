@@ -157,6 +157,7 @@ def condition_editor(ds, labels):
                                                        help="試料以外 (QC・ブランク) は群比較などの生物学的な解析から除き、QC タブで評価します"),
             SUBJECT_COL: st.column_config.TextColumn(SUBJECT_COL, help="同じ個体の再注入・技術反復には同じ ID を (空欄 = label)"),
             TIME_COL: st.column_config.TextColumn(TIME_COL, help="同じ個体を複数時点で測った場合の時点"),
+            lp.SERUM_COL: st.column_config.TextColumn(lp.SERUM_COL, help="出発血清量を試料ごとに変える場合だけ入力 (空欄 = サイドバーの設定)"),
         },
     )
     ss[cur_key] = edited
@@ -254,7 +255,7 @@ with st.sidebar:
     st.header("2. 定量方式と換算")
     full0 = load_full(sources[0][1])
     quant_method = st.selectbox(
-        "LabSolutions の定量方式", lp.QUANT_METHODS, key="q_method",
+        "LabSolutions の定量方式", lp.QUANT_METHODS, index=lp.QUANT_METHODS.index(lp.QM_EXTERNAL), key="q_method",
         help="LabSolutions の検量線が IS 面積比を使っているか。エクスポートには含まれないため設定してください。"
              "未設定の間はアプリで IS 補正をしません")
     is_name = st.selectbox("内部標準 (IS)", common, index=common.index(IS_NAME) if IS_NAME in common else 0,
@@ -274,11 +275,25 @@ with st.sidebar:
         "希釈測定の倍率", lp.DILUTION_STATES, key="q_dil_state",
         help="x10 などの希釈測定で、LabSolutions の濃度に希釈倍率が既に掛かっているか。未設定の間は希釈の統合と倍率の適用をしません")
     unit = st.text_input("濃度の単位 (LabSolutions)", value="未設定", key="q_unit", help="エクスポートに含まれないため設定してください")
-    vol_on = st.checkbox("前処理の体積換算を行う (元の血清・血漿中濃度にする)", value=False, key="q_vol_on")
-    c1, c2 = st.columns([1, 2])
-    vol_factor = c1.number_input("体積換算係数", 0.0001, 1e6, 1.0, key="q_vol", disabled=not vol_on, format="%.4g")
-    vol_def = c2.text_input("係数の定義", value="", key="q_vol_def", disabled=not vol_on,
-                            placeholder="例: 血清 10 µL を 100 µL に抽出 → 10")
+    vol_on = st.checkbox("換算濃度 (元の血清中濃度) にする", value=True, key="q_vol_on",
+                         help="LabSolutions の濃度はバイアル中 (測定液) の濃度。前処理の体積比を掛けて元の血清中濃度にします")
+    preset = st.selectbox("試料 (出発血清量)", list(lp.SERUM_PRESETS), key="q_preset", disabled=not vol_on)
+    c1, c2 = st.columns([2, 1])
+    const_expr = c1.text_input("換算式の定数部分", value=lp.CONV_CONST_DEFAULT, key="q_conv_const", disabled=not vol_on,
+                               help="前処理の体積比。四則演算で書けます")
+    serum_ul = c2.number_input("出発血清量 (µL)", 1.0, 10000.0,
+                               lp.SERUM_PRESETS.get(preset) or 50.0, key=f"q_serum::{preset}",
+                               disabled=not vol_on or lp.SERUM_PRESETS.get(preset) is not None)
+    if lp.SERUM_PRESETS.get(preset) is not None:
+        serum_ul = lp.SERUM_PRESETS[preset]
+    try:
+        vol_factor = lp.conversion_factor(const_expr, serum_ul)
+        vol_def = f"({const_expr}) x 1/{serum_ul:g} = {vol_factor:.4f} [{preset}]"
+        if vol_on:
+            st.caption(f"換算係数 = {vol_def}。試料ごとの出発血清量は 条件設定 タブの「血清量 (µL)」で上書きできます")
+    except Exception as e:
+        st.error(f"換算式を計算できません: {e}")
+        vol_factor, vol_def, vol_on = None, "", False
     dilution_mode = st.radio("希釈の扱い", [BY_GROUP, MERGED], key="dilution_mode",
                              help="「検量線範囲で統合」は 検量線・希釈 タブの設定で希釈なし / 希釈測定を化合物ごとに選び、"
                                   "1 サンプル 1 行にまとめます。希釈測定の倍率の設定が必要です")
@@ -475,6 +490,7 @@ def single_mode(d):
         st.header("4. 解析に使うサンプル")
         cond_filter = st.multiselect("condition で絞り込み (空欄 = すべて)", conds, key=f"cond_filter::{d['name']}",
                                      help="個別のサンプルの除外は 条件設定 タブの「使用」列で行います")
+    qset.volume_by_label = lp.volume_overrides(meta, const_expr) if vol_on else {}
     result = run_pipeline(d, ranges_edit, choices)
     base, compounds, factors, result = make_base(d, cond_map, control, result, used, cond_filter, meta)
     with tab_prov:
@@ -799,6 +815,7 @@ def multi_mode(datasets):
     bases, all_groups = {}, set()
     for d in datasets:
         cond_map, conds, control, used, meta = settings[d["name"]]
+        qset.volume_by_label = lp.volume_overrides(meta, const_expr) if vol_on else {}
         b, _, _, _ = make_base(d, cond_map, control, used=used, meta=meta)
         b = b[b[COND_COL] != ""]
         if control is None or not (b[COND_COL] == control).any():
