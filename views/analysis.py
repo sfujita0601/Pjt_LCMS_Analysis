@@ -9,6 +9,7 @@ import streamlit as st
 from sklearn.decomposition import PCA
 
 import lcms_analysis as la
+import lcms_pipeline as lp
 import lcms_qc as qc
 import lcms_stats as ls
 from lcms_analysis import (
@@ -18,9 +19,9 @@ from lcms_plots import bar_samples, bar_summary, clustered_heatmap, heatmap_grid
 from make_conc_table import FILE_COL, IS_NAME, LABEL_COL, MISSING, is_std
 from ui_common import (
     colormap_select, colorscale_for, compound_picker, compound_select, figure_settings, reset_chart_counter, show_chart,
-    theme, to_csv_bytes,
+    app_version, register_output, reset_outputs, theme, to_csv_bytes,
 )
-from ui_qc import accuracy_tab, calibration_choices, calibration_tab, drift_tab, merged_table
+from ui_qc import accuracy_tab, calibration_choices, calibration_tab, drift_tab, provenance_tab, qc_tab
 from ui_external import cca_tab, external_tab, groups_tab, merge_external
 from ui_extra import limits_tab, twoway_tab, multigroup_tab, ratio_definitions, ratio_view
 from ui_project import check_data, loader, saver
@@ -33,12 +34,13 @@ BY_GROUP, MERGED = "希釈グループごとに解析", "検量線範囲で統�
 UNSET = "未設定"
 
 
-@st.cache_data(show_spinner="読み込み中...")
+# 読み込んだデータはサーバーのメモリにキャッシュされる。最大 1 時間・20 件で破棄する (README 参照)
+@st.cache_data(show_spinner="読み込み中...", ttl=3600, max_entries=20)
 def load_tables(raw_bytes, is_name):
     return la.load_tables(raw_bytes, is_name)
 
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, ttl=3600, max_entries=20)
 def load_full(raw_bytes):
     return qc.parse_full(raw_bytes)
 
@@ -65,6 +67,13 @@ def range_label(stat):
 # ---------------------------------------------------------------- condition 入力
 USE_COL = "使用"
 BULK_COND, BULK_OFF, BULK_ON = "condition を設定", "解析に使わない", "解析に使う"
+from lcms_pipeline import META_COLS, SAMPLE_TYPES, SUBJECT_COL, T_SAMPLE, T_STD, TIME_COL, TYPE_COL, apply_metadata
+
+
+def _clean(v):
+    """表のセルの値を文字列にする (空欄・None・NaN は "")。"""
+    return "" if v is None or (isinstance(v, float) and np.isnan(v)) or str(v).strip() in ("None", "nan") \
+        else str(v).strip()
 
 
 def condition_editor(ds, labels):
@@ -75,11 +84,19 @@ def condition_editor(ds, labels):
         # label の一覧が変わったとき (表記ゆれの統一など) は、入力済みの内容を label で引き継ぐ
         prev = ss.get(cur_key, ss.get(init_key))
         old = prev.set_index(LABEL_COL) if prev is not None else pd.DataFrame(columns=[COND_COL, USE_COL])
-        ss[init_key] = pd.DataFrame({
-            LABEL_COL: labels,
-            COND_COL: [old[COND_COL].get(lb, "") for lb in labels],
-            USE_COL: [bool(old[USE_COL].get(lb, True)) for lb in labels],
-        })
+        init = {LABEL_COL: labels, COND_COL: [old[COND_COL].get(lb, "") for lb in labels],
+                USE_COL: [bool(old[USE_COL].get(lb, True)) for lb in labels]}
+        for c in META_COLS:
+            default = [(T_STD if is_std(lb) else T_SAMPLE) if c == TYPE_COL else "" for lb in labels]
+            init[c] = [old[c].get(lb, dv) if c in old else dv for lb, dv in zip(labels, default)]
+        ss[init_key] = pd.DataFrame(init)
+        ss[ver_key] = ss.get(ver_key, -1) + 1
+    elif any(c not in ss[init_key] for c in META_COLS):  # 以前の版で保存した表にはメタデータの列が無い
+        df = ss.get(cur_key, ss[init_key]).copy()
+        for c in META_COLS:
+            if c not in df:
+                df[c] = [(T_STD if is_std(lb) else T_SAMPLE) if c == TYPE_COL else "" for lb in df[LABEL_COL]]
+        ss[init_key] = df
         ss[ver_key] = ss.get(ver_key, -1) + 1
 
     def reset_editor(df):
@@ -107,7 +124,8 @@ def condition_editor(ds, labels):
                     cur.loc[mask, USE_COL] = action == BULK_ON
                 reset_editor(cur)
                 st.rerun()
-        up = st.file_uploader("対応表 CSV (列: label, condition, 使用 [任意])", type=["csv"], key=f"_up_map::{ds}")
+        up = st.file_uploader("対応表 CSV (列: label, condition, 使用・試料種別・個体ID・時点 などは任意)", type=["csv"],
+                              key=f"_up_map::{ds}")
         if up is not None and ss.get(f"map_done::{ds}") != up.file_id:
             try:
                 m = pd.read_csv(up, dtype=str, encoding="utf-8-sig").fillna("")
@@ -121,6 +139,10 @@ def condition_editor(ds, labels):
                     use = dict(zip(m[LABEL_COL].str.strip(), m[USE_COL].str.strip().str.lower()))
                     cur[USE_COL] = [use.get(lb, str(u)).lower() in ("true", "1", "yes", "○", "使用")
                                     for lb, u in zip(cur[LABEL_COL], cur[USE_COL])]
+                for c in META_COLS:
+                    if c in m:
+                        vals = dict(zip(m[LABEL_COL].str.strip(), m[c].str.strip()))
+                        cur[c] = [vals.get(lb, v) for lb, v in zip(cur[LABEL_COL], cur[c])]
                 ss[f"map_done::{ds}"] = up.file_id
                 reset_editor(cur)
                 st.rerun()
@@ -131,17 +153,25 @@ def condition_editor(ds, labels):
         column_config={
             COND_COL: st.column_config.TextColumn(COND_COL, help="実験群名 (空欄 = 条件ごとの集計から除外)"),
             USE_COL: st.column_config.CheckboxColumn(USE_COL, help="チェックを外したサンプルは、QC 以外のすべての解析から除外します"),
+            TYPE_COL: st.column_config.SelectboxColumn(TYPE_COL, options=SAMPLE_TYPES, required=True,
+                                                       help="試料以外 (QC・ブランク) は群比較などの生物学的な解析から除き、QC タブで評価します"),
+            SUBJECT_COL: st.column_config.TextColumn(SUBJECT_COL, help="同じ個体の再注入・技術反復には同じ ID を (空欄 = label)"),
+            TIME_COL: st.column_config.TextColumn(TIME_COL, help="同じ個体を複数時点で測った場合の時点"),
         },
     )
     ss[cur_key] = edited
-    cond_map = {lb: str(c).strip() for lb, c in zip(edited[LABEL_COL], edited[COND_COL]) if str(c).strip()}
+    cond_map = {lb: _clean(c) for lb, c in zip(edited[LABEL_COL], edited[COND_COL]) if _clean(c)}
     used = set(edited.loc[edited[USE_COL].fillna(True).astype(bool), LABEL_COL])
     n_off = len(labels) - len(used)
     if n_off:
         st.caption(f"解析に使わない label: {n_off} 件 ({', '.join(sorted(set(labels) - used, key=la.natural_key))})")
     st.download_button("対応表 CSV をダウンロード", to_csv_bytes(edited), f"{ds}_condition.csv", "text/csv",
                        key=f"_dl_map::{ds}")
-    return cond_map, used
+    meta = edited.set_index(LABEL_COL)[[c for c in META_COLS if c in edited]].map(_clean)
+    meta[TYPE_COL] = meta[TYPE_COL].replace("", T_SAMPLE)
+    meta.loc[[lb for lb in meta.index if is_std(lb)], TYPE_COL] = T_STD
+    meta[SUBJECT_COL] = [s_ or lb for lb, s_ in zip(meta.index, meta[SUBJECT_COL])]
+    return cond_map, used, meta
 
 
 def control_select(ds, conds):
@@ -175,6 +205,7 @@ def summary_hover(summ, stat, index_col):
 # ================================================================ サイドバー
 st.title("LC-MS/MS 定量解析")
 reset_chart_counter()
+reset_outputs()
 pal = theme()
 
 with st.sidebar:
@@ -218,27 +249,63 @@ with st.sidebar:
     if not common:
         st.error("全サンプルで検出された化合物が無いため、内部標準を選べません")
         st.stop()
-    is_name = st.selectbox("内部標準", common, index=common.index(IS_NAME) if IS_NAME in common else 0, key="is_name",
-                           help="全サンプル (STD を除く) で検出された化合物だけを候補にしています")
     na_rep = st.text_input("CSV の欠損値表記", value="", key="na_rep", help=f"未検出 ({MISSING}) を置き換える文字。空欄のままでも可")
 
-    st.header("2. 解析に使うデータ")
-    source = st.radio("濃度", ["IS 補正後", "補正前 (生データ)"], key="source")
-    include_std = source.startswith("補正前") and st.checkbox("STD を含める", value=False, key="include_std")
+    st.header("2. 定量方式と換算")
+    full0 = load_full(sources[0][1])
+    quant_method = st.selectbox(
+        "LabSolutions の定量方式", lp.QUANT_METHODS, key="q_method",
+        help="LabSolutions の検量線が IS 面積比を使っているか。エクスポートには含まれないため設定してください。"
+             "未設定の間はアプリで IS 補正をしません")
+    is_name = st.selectbox("内部標準 (IS)", common, index=common.index(IS_NAME) if IS_NAME in common else 0,
+                           key="is_name", help="全サンプル (STD を除く) で検出された化合物だけを候補にしています")
+    diag = lp.diagnose_quant_method(full0, is_name)
+    st.caption(f"参考 (データからの診断): {diag['hint']} "
+               f"[濃度/面積 の CV {diag['cv_external']:.2f}% ・ 濃度/(面積/IS 面積) の CV {diag['cv_internal']:.1f}%, "
+               f"{diag['n_compounds']} 化合物]")
+    app_is = st.checkbox("アプリで IS 補正を行う", value=False, key="q_app_is",
+                         disabled=quant_method != lp.QM_EXTERNAL,
+                         help="外部標準法のときだけ選べます (内部標準法なら LabSolutions で補正済みのため二重補正になる)。"
+                              "係数 = 希釈グループ内の IS 平均 / 各ファイルの IS")
+    c1, c2 = st.columns(2)
+    is_stage = c1.selectbox("IS の添加段階", lp.IS_STAGES, key="q_is_stage")
+    is_conc_def = c2.text_input("IS 濃度の定義", value="", key="q_is_conc", placeholder="例: 抽出液中 10 µM")
+    dilution_state = st.selectbox(
+        "希釈測定の倍率", lp.DILUTION_STATES, key="q_dil_state",
+        help="x10 などの希釈測定で、LabSolutions の濃度に希釈倍率が既に掛かっているか。未設定の間は希釈の統合と倍率の適用をしません")
+    unit = st.text_input("濃度の単位 (LabSolutions)", value="未設定", key="q_unit", help="エクスポートに含まれないため設定してください")
+    vol_on = st.checkbox("前処理の体積換算を行う (元の血清・血漿中濃度にする)", value=False, key="q_vol_on")
+    c1, c2 = st.columns([1, 2])
+    vol_factor = c1.number_input("体積換算係数", 0.0001, 1e6, 1.0, key="q_vol", disabled=not vol_on, format="%.4g")
+    vol_def = c2.text_input("係数の定義", value="", key="q_vol_def", disabled=not vol_on,
+                            placeholder="例: 血清 10 µL を 100 µL に抽出 → 10")
     dilution_mode = st.radio("希釈の扱い", [BY_GROUP, MERGED], key="dilution_mode",
                              help="「検量線範囲で統合」は 検量線・希釈 タブの設定で希釈なし / 希釈測定を化合物ごとに選び、"
-                                  "1 サンプル 1 行にまとめます (希釈測定は希釈倍率を掛けた値)")
+                                  "1 サンプル 1 行にまとめます。希釈測定の倍率の設定が必要です")
     merge_mode = dilution_mode == MERGED
-    mult_dilution = st.checkbox("希釈倍率を掛けて元濃度に換算", value=False, disabled=merge_mode, key="mult_dilution",
-                                help="x10 のサンプルの値を 10 倍して表示・解析します")
+    mult_dilution = st.checkbox("希釈倍率を掛けて元濃度に換算", value=False, key="mult_dilution",
+                                disabled=merge_mode or dilution_state != lp.DIL_NOT_APPLIED,
+                                help="希釈グループごとの解析で、希釈測定の値に倍率を掛けます (倍率が未適用と設定した場合のみ)")
+    with st.expander("採否のルール"):
+        tol = st.number_input("希釈間の一致の許容 (%)", 1.0, 200.0, 20.0, 1.0, key="q_tol",
+                              help="両方の希釈が検量範囲内のとき、希釈測定 x 倍率 / 希釈なし がこの範囲を外れたら「確認必要」")
+        reinjection = st.radio("同じ試料・同じ希釈の再注入", [lp.REINJECT_FIRST, lp.REINJECT_MEAN], key="q_reinject")
+        exclude_status = st.multiselect("解析から除く状態", [x for x in lp.STATUS_ORDER if x != lp.ST_OK],
+                                        default=[lp.ST_ERR], key="q_exclude",
+                                        help="除いた値は欠損として扱います (元の値と理由は処理履歴に残ります)")
     exclude_is = st.checkbox("内部標準を化合物から除外", value=True, key="exclude_is")
+    include_std = False
+    qset = lp.QuantSettings(quant_method=quant_method, app_is=app_is, is_name=is_name, is_stage=is_stage,
+                            is_conc_def=is_conc_def, dilution_state=dilution_state,
+                            volume_factor=vol_factor if vol_on else None, volume_def=vol_def, unit=unit,
+                            consistency_tol=tol, reinjection=reinjection)
     harmonize = st.checkbox("label の「_」を「-」に統一", value=False, key="harmonize",
                             help="例: D_1 と D-1 を同じサンプルとして扱います (ファイル名の表記ゆれ対策)")
 
     st.header("定量限界・検出限界")
     mask_level = st.selectbox("マスク", [qc.MASK_NONE, qc.MASK_LOD, qc.MASK_LOQ], key="mask_level",
-                              help="測定ごとの LOD / LOQ (LabSolutions が S/N から算出) を下回る値を扱いを変えます。"
-                                   "判定は IS 補正前の算出濃度で行います (S/N = ∞ で限界値が 0 の測定は対象外)")
+                              help="測定ごとの LOD / LOQ (LabSolutions が S/N から算出) を下回る値の扱い。既定はマスクしない。"
+                                   "判定は LabSolutions の算出濃度で行います (S/N = ∞ で限界値が 0 の測定は対象外)")
     mask_repl = st.radio("マスクした値", [qc.REPL_NAN, qc.REPL_HALF, qc.REPL_LIM], key="mask_repl",
                          disabled=mask_level == qc.MASK_NONE)
 
@@ -264,53 +331,113 @@ datasets = []
 for name, b in sources:
     raw_df, is_df, cpds = load_tables(b, is_name)
     raw_df, is_df, full = fix_labels(raw_df), fix_labels(is_df), fix_labels(load_full(b))
-    df = is_df if source == "IS 補正後" else raw_df
-    df, n_masked = qc.apply_limit_mask(df, full, cpds, mask_level, mask_repl, skip=(is_name,))
-    mask_info = (f"{name}: {mask_level} の値 {n_masked} 個を「{mask_repl}」で処理しています (内部標準を除く)。"
-                 if mask_level != qc.MASK_NONE else "")
-    datasets.append(dict(name=name, raw=raw_df, is_df=is_df, compounds=cpds, full=full, df=df, mask_info=mask_info))
+    datasets.append(dict(name=name, raw=raw_df, is_df=is_df, compounds=cpds, full=full, mask_info=""))
 
 
 def detected(base, cpds):
     return [c for c in cpds if base[c].notna().any() and not (exclude_is and c == is_name)]
 
 
-def make_base(d, cond_map, control, merged=None, used=None, cond_filter=None):
-    """解析用の表を作る: (検量線範囲での統合) -> condition 付与 -> サンプルの選択 -> 正規化。
+def pipeline_ranges(d, ranges_edit=None):
+    """処理パイプライン用の検量範囲。検量線・希釈 タブで範囲を編集した化合物は「1 点検量」扱いを外す。"""
+    rng = qc.calibration_ranges(d["full"]).reindex(d["compounds"])
+    rng["一点検量"] = rng["一点検量"].fillna(True).astype(bool)
+    if ranges_edit is not None:
+        for c in ranges_edit.index.intersection(rng.index):
+            lo, hi = ranges_edit.at[c, "下限"], ranges_edit.at[c, "上限"]
+            if (pd.notna(lo) and lo != rng.at[c, "下限"]) or (pd.notna(hi) and hi != rng.at[c, "上限"]):
+                rng.at[c, "下限"], rng.at[c, "上限"], rng.at[c, "一点検量"] = lo, hi, False
+    return rng
+
+
+def run_pipeline(d, ranges_edit=None, choices=None):
+    """LabSolutions の出力から解析用の値と処理履歴を作る (lcms_pipeline.run)。"""
+    if ranges_edit is None and merge_mode:
+        ranges_edit, choices = calibration_choices(d["name"], d["full"], d["raw"], d["compounds"], editable=False)
+    res = lp.run(d["full"], d["raw"], d["compounds"], qset, pipeline_ranges(d, ranges_edit), choices or {},
+                 merge=merge_mode, mult_dilution=mult_dilution, mask_level=mask_level, mask_repl=mask_repl,
+                 exclude_status=tuple(exclude_status))
+    n_masked = int((res.provenance["マスク"] != "").sum())
+    d["mask_info"] = (f"{d['name']}: {mask_level} の値 {n_masked} 個を「{mask_repl}」で処理しています。"
+                      if mask_level != qc.MASK_NONE else "")
+    return res
+
+
+PROCESSING_ORDER = [
+    "1. LabSolutions の濃度を読み込む (未検出 = -----)",
+    "2. 値の状態を判定 (LOD/LOQ・検量範囲)",
+    "3. 希釈の採用 (統合する場合) / 再注入の扱い",
+    "4. IS 係数 (外部標準法で有効にした場合のみ)",
+    "5. 希釈係数 (LabSolutions で未適用の場合のみ)",
+    "6. 体積換算係数 (設定した場合のみ)",
+    "7. LOD/LOQ 未満のマスク (設定した場合のみ)",
+    "8. 解析から除く状態の値を欠損にする",
+    "9. サンプルの選択 (使用・condition・試料種別)、技術反復の平均",
+    "10. サンプル間の正規化 (設定した場合のみ)",
+    "11. 各解析の前処理 (log 変換・スケーリングなど、タブごと)",
+]
+
+
+def record_run_info(d, result, used, labels, factors, base, compounds):
+    """解析設定の保存・まとめて出力に入れる実行情報。"""
+    isf = result.provenance.drop_duplicates("採用した測定")[["採用した測定", "IS 係数", "希釈係数", "体積換算係数"]]
+    st.session_state["_run_info"] = {
+        "アプリの版": app_version(),
+        "データセット": d["name"],
+        "定量方式と換算": qset.to_dict(),
+        "値の意味": qset.meaning(norm_method != ls.NORM_NONE),
+        "処理の順序": PROCESSING_ORDER,
+        "処理の注記": result.notes,
+        "希釈の扱い": dilution_mode,
+        "マスク": f"{mask_level} / {mask_repl}",
+        "解析から除いた状態": list(exclude_status),
+        "解析に使わない label (使用のチェックを外したもの)": sorted(set(labels) - set(used), key=la.natural_key),
+        "正規化": norm_method,
+        "解析に使った行数": int(len(base)),
+        "解析に使った化合物数": len(compounds),
+        "生物学的 n の情報": d.get("n_info", ""),
+        "乱数の種": {"UMAP": st.session_state.get("umap_seed", 42), "相関ネットワークの配置": 42,
+                    "CCA の置換検定": 0, "図の点の横ずらし": 0},
+        "適用した係数 (測定ごと)": isf.dropna(subset=["採用した測定"]).to_dict("records"),
+    }
+    register_output(f"{d['name']}/正規化係数", factors) if len(factors) else None
+    register_output(f"{d['name']}/解析に使った表", base)
+
+
+def make_base(d, cond_map, control, result=None, used=None, cond_filter=None, meta=None):
+    """解析用の表を作る: 処理パイプライン -> condition 付与 -> サンプルの選択 -> 正規化。
 
     used: 解析に使う label の集合 (None = すべて)、cond_filter: 残す condition (空 = すべて)。
     サンプルの選択は正規化の前に行う (除外したサンプルが PQN の参照などに影響しないように)。
-    (表, 化合物, 正規化係数) を返す。
+    (表, 化合物, 正規化係数, 処理パイプラインの結果) を返す。
     """
-    df, inc_std, mult = d["df"], include_std, mult_dilution
-    if merge_mode:
-        if merged is None:
-            ranges, choices = calibration_choices(d["name"], d["full"], d["raw"], d["compounds"], editable=False)
-            merged, _, _ = merged_table(d["df"], d["raw"], d["compounds"], ranges, choices)
-        df, inc_std, mult = merged, False, False
-    base = la.build_base(df, d["compounds"], cond_map, inc_std, mult)
+    result = result or run_pipeline(d)
+    base = la.build_base(result.values, d["compounds"], cond_map, False, False)
     keep = pd.Series(True, index=base.index)
     if used is not None:
-        keep &= base[LABEL_COL].isin(used) | base[LABEL_COL].map(is_std)
+        keep &= base[LABEL_COL].isin(used)
     if cond_filter:
-        keep &= base[COND_COL].isin(cond_filter) | base[LABEL_COL].map(is_std)
+        keep &= base[COND_COL].isin(cond_filter)
     base = base[keep]
+    if meta is not None and len(base):
+        base, info = apply_metadata(base, meta, d["compounds"])
+        d["n_info"] = info
     cpds = detected(base, d["compounds"])
     try:
         base, factors = ls.normalize(base, cpds, norm_method, norm_ref, control, pqn_total)
     except ValueError as e:
         st.warning(f"{d['name']}: 正規化できません ({e})。正規化なしで続けます。")
         factors = pd.DataFrame()
-    return base, cpds, factors
+    return base, cpds, factors, result
 
 
 # ================================================================ 単一データセット
 def single_mode(d):
-    tabs = st.tabs(["条件設定", "検量線・希釈", "STD 正確さ", "LOD・LOQ", "ドリフト", "テーブル", "代謝物比", "外部データ",
-                    "変数グループ", "棒グラフ", "ヒートマップ", "散布図", "クラスタリング", "PCA", "UMAP", "ボルケーノ",
-                    "多群比較", "二元配置 ANOVA", "相関", "正準相関", "KEGG"])
-    (tab_cond, tab_cal, tab_acc, tab_lim, tab_drift, tab_tbl, tab_ratio, tab_ext, tab_grp, tab_bar, tab_hm, tab_sc,
-     tab_cl, tab_pca, tab_umap, tab_vol, tab_mg, tab_tw, tab_cor, tab_cca, tab_kegg) = tabs
+    tabs = st.tabs(["条件設定", "検量線・希釈", "処理履歴・状態", "STD 正確さ", "LOD・LOQ", "QC", "ドリフト", "テーブル",
+                    "代謝物比", "外部データ", "変数グループ", "棒グラフ", "ヒートマップ", "散布図", "クラスタリング", "PCA",
+                    "UMAP", "ボルケーノ", "多群比較", "二元配置 ANOVA", "相関", "正準相関", "KEGG"])
+    (tab_cond, tab_cal, tab_prov, tab_acc, tab_lim, tab_qc, tab_drift, tab_tbl, tab_ratio, tab_ext, tab_grp, tab_bar,
+     tab_hm, tab_sc, tab_cl, tab_pca, tab_umap, tab_vol, tab_mg, tab_tw, tab_cor, tab_cca, tab_kegg) = tabs
     all_labels = sorted(d["raw"][LABEL_COL].unique(), key=la.natural_key)
 
     with tab_cond:
@@ -318,7 +445,7 @@ def single_mode(d):
                    "x10 と希釈なしの同じ label には同じ設定が付きます。Excel などからのコピー & ペーストもできます。")
         c1, c2 = st.columns([3, 1])
         with c1:
-            cond_map, used = condition_editor(d["name"], all_labels)
+            cond_map, used, meta = condition_editor(d["name"], all_labels)
         conds = la.condition_order(cond_map, all_labels)
         with c2:
             control = control_select(d["name"], conds)
@@ -328,7 +455,7 @@ def single_mode(d):
                 st.dataframe(cnt.rename("label 数"), height=min(400, 36 * (len(conds) + 1)))
 
     with tab_cal:
-        merged = calibration_tab(d["name"], d["full"], d["df"], d["raw"], d["compounds"], na_rep)
+        ranges_edit, choices = calibration_tab(d["name"], d["full"], d["raw"], d["compounds"], dilution_state)
     with tab_acc:
         accuracy_tab(d["full"], pal)
     with tab_lim:
@@ -348,7 +475,13 @@ def single_mode(d):
         st.header("4. 解析に使うサンプル")
         cond_filter = st.multiselect("condition で絞り込み (空欄 = すべて)", conds, key=f"cond_filter::{d['name']}",
                                      help="個別のサンプルの除外は 条件設定 タブの「使用」列で行います")
-    base, compounds, factors = make_base(d, cond_map, control, merged, used, cond_filter)
+    result = run_pipeline(d, ranges_edit, choices)
+    base, compounds, factors, result = make_base(d, cond_map, control, result, used, cond_filter, meta)
+    with tab_prov:
+        provenance_tab(d["name"], result, qset, na_rep, norm_method != ls.NORM_NONE)
+    record_run_info(d, result, used, all_labels, factors, base, compounds)
+    with tab_qc:
+        qc_tab(d["name"], d["full"], meta, d["compounds"])
     if ratios:
         base = la.add_ratios(base, ratios)  # 比は正規化係数に依存しないので、正規化の後に計算する
         if add_ratio:
@@ -376,6 +509,7 @@ def single_mode(d):
         f"condition: {len(conds)} 群" + (f" (対照群: {control})" if has_control else "")
         + f" ・ 希釈: {dilution_mode} ・ 正規化: {norm_method}"
     )
+    st.caption(f"値の意味: {qset.meaning(norm_method != ls.NORM_NONE)}" + (f" ・ {d['n_info']}" if d.get("n_info") else ""))
 
     # ------------------------------------------------ テーブル
     with tab_tbl:
@@ -401,7 +535,8 @@ def single_mode(d):
                                "text/csv", key="_dl_is")
 
         st.subheader("解析に使う表")
-        st.caption(f"濃度: {source} ・ 希釈: {dilution_mode} ・ 正規化: {norm_method}。棒グラフ以降のタブはこの表を使います。")
+        st.caption(f"値の意味: {qset.meaning(norm_method != ls.NORM_NONE)} ・ 希釈: {dilution_mode} ・ 正規化: {norm_method}。"
+                   "棒グラフ以降のタブはこの表を使います。")
         used_cols = [FILE_COL, LABEL_COL, COND_COL, GROUP_COL] + compounds
         st.dataframe(base[used_cols], hide_index=True, height=320)
         st.download_button("CSV をダウンロード", to_csv_bytes(base[used_cols], na_rep), f"{d['name']}_analysis.csv",
@@ -418,7 +553,7 @@ def single_mode(d):
             sel = compound_select("bar_cpds", compounds, default=compounds[:1], max_selections=40)
         show_points = c2.checkbox("各サンプルの点を重ねる", value=True, disabled=not by_cond, key="bar_pts")
         if sel:
-            ytitle = kind
+            ytitle = kind if not (kind == CONC and norm_method != ls.NORM_NONE) else "正規化値 (相対値)"
             if by_cond:
                 df = base[base[COND_COL] != ""]
                 if df.empty:
@@ -481,6 +616,8 @@ def single_mode(d):
         else:
             vals = np.concatenate([m.values.ravel() for m in mats.values()])
             cs, title, mid, zr = colorscale_for(kind, pal, vals, limit, cmap)
+            if norm_method != ls.NORM_NONE:  # 正規化後の値は濃度として表示しない
+                title = title.replace("濃度", "正規化値")
             if by_cond:
                 title = f"{title}<br>({stat_label(stat)})"
             show_chart(st, heatmap_grid(mats, cs, title, mid, zr, hovers or None), width="stretch")
@@ -653,16 +790,16 @@ def multi_mode(datasets):
             with st.expander(d["name"], expanded=i == 0):
                 c1, c2 = st.columns([3, 1])
                 with c1:
-                    cond_map, used = condition_editor(d["name"], labels)
+                    cond_map, used, meta = condition_editor(d["name"], labels)
                 with c2:
                     control = control_select(d["name"], la.condition_order(cond_map, labels))
-                settings[d["name"]] = (cond_map, la.condition_order(cond_map, labels, control), control, used)
+                settings[d["name"]] = (cond_map, la.condition_order(cond_map, labels, control), control, used, meta)
 
     # 各データセットで FC を計算して縦に連結
     bases, all_groups = {}, set()
     for d in datasets:
-        cond_map, conds, control, used = settings[d["name"]]
-        b, _, _ = make_base(d, cond_map, control, used=used)
+        cond_map, conds, control, used, meta = settings[d["name"]]
+        b, _, _, _ = make_base(d, cond_map, control, used=used, meta=meta)
         b = b[b[COND_COL] != ""]
         if control is None or not (b[COND_COL] == control).any():
             continue
@@ -761,4 +898,4 @@ else:
 
 with st.sidebar:
     st.header("解析設定の保存")
-    saver(sources, EXTERNAL_FILES)
+    saver(sources, EXTERNAL_FILES, st.session_state.get("_run_info"))

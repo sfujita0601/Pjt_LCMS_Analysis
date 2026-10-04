@@ -18,7 +18,7 @@ from lcms_analysis import COND_COL, GROUP_COL, log10_safe, natural_key
 from lcms_plots import color_map, resolve_colormap, scale
 from make_conc_table import LABEL_COL
 from lcms_plots import group_plot
-from ui_common import colormap_select, compound_picker, reset_editor, show_chart, stable_editor, symmetric_limit, to_csv_bytes
+from ui_common import colormap_select, compound_picker, register_output, reset_editor, show_chart, stable_editor, symmetric_limit, to_csv_bytes
 
 UP, DOWN, NS = "増加", "減少", "有意差なし"
 
@@ -33,10 +33,14 @@ def volcano_tab(base, groups, conds, control, compounds, pal):
     c1, c2, c3, c4 = st.columns(4)
     group = c1.selectbox("希釈グループ", groups, key="vol_group")
     treat = c2.selectbox(f"比較群 (vs 対照群 {control})", others, key="vol_treat")
-    test = c3.selectbox("検定", ls.TESTS, key="vol_test")
+    paired = "個体ID" in base and base.groupby(COND_COL)["個体ID"].apply(set).pipe(
+        lambda s_: len(s_.get(control, set()) & set().union(*[v for k, v in s_.items() if k != control])) > 0)
+    design = c3.radio("デザイン", ["独立 2 群", "対応あり (個体IDで対応づけ)"], key="vol_design", disabled=not paired,
+                      help="同じ個体を 2 つの条件 (時点など) で測った場合。個体ID は 条件設定 タブで入力します")
+    test = c3.selectbox("検定", ls.PAIRED_TESTS if design.startswith("対応") else ls.TESTS, key=f"vol_test_{design[:2]}")
     corr = c4.selectbox("多重性補正", list(ls.CORRECTIONS), key="vol_corr")
     c1, c2, c3, c4, c5 = st.columns(5)
-    log_test = c1.checkbox("t 検定は log2 値で行う", value=True, key="vol_log", disabled="t 検定" not in test,
+    log_test = c1.checkbox("t 検定は log2 値で行う", value=True, key="vol_log", disabled="t 検定" not in test and not test.startswith("対応"),
                            help="濃度は右に裾を引く分布になりやすいため、対数変換してから t 検定するのが一般的です")
     fc_thr = c2.number_input("|log2FC| の閾値", 0.0, 10.0, 1.0, 0.25, key="vol_fc")
     q_thr = c3.number_input("補正後 p の閾値", 0.0, 1.0, 0.05, 0.01, format="%.3f", key="vol_q")
@@ -45,7 +49,8 @@ def volcano_tab(base, groups, conds, control, compounds, pal):
     compounds = compound_picker("vol", compounds)
 
     sub = base[base[GROUP_COL] == group]
-    res = ls.compare_groups(sub, compounds, treat, control, test, corr, log_test)
+    res = ls.compare_groups(sub, compounds, treat, control, test, corr, log_test,
+                            paired_by="個体ID" if design.startswith("対応") else None)
     res["判定"] = np.select([(res["q"] <= q_thr) & (res["log2FC"] >= fc_thr),
                              (res["q"] <= q_thr) & (res["log2FC"] <= -fc_thr)], [UP, DOWN], NS)
     y = -np.log10(res["p"] if yaxis == "-log10(p)" else res["q"])
@@ -76,6 +81,7 @@ def volcano_tab(base, groups, conds, control, compounds, pal):
     st.caption(f"FC = {treat} の平均 / {control} の平均。点線 = 閾値 (|log2FC| ≥ {fc_thr}, 補正後 p ≤ {q_thr})。"
                " どちらかの群で検出が 2 未満の化合物は検定せず除外しています。")
     out = res.drop(columns=["-log10"]).sort_values("p")
+    register_output(f"統計/2 群比較 {treat} vs {control} ({group})", out)
     st.dataframe(out.round(5), hide_index=True, height=320)
     st.download_button("検定結果 (CSV)", to_csv_bytes(out), f"volcano_{treat}_vs_{control}.csv", "text/csv", key="_dl_vol")
 

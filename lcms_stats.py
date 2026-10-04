@@ -127,30 +127,68 @@ def _test_raw(a, b, test):
     raise ValueError(test)
 
 
-def compare_groups(df, compounds, treat, control, test, correction, log_for_test=True, min_n=2):
+PAIRED_TESTS = ["対応のある t 検定", "Wilcoxon の符号付き順位検定"]
+
+
+def _effect(a, b):
+    """log2 値での効果量: 平均の差 (= log2 幾何平均比)、その 95% 信頼区間 (Welch)、Hedges の g。"""
+    la_, lb_ = pd.Series(log2_safe(a)).dropna(), pd.Series(log2_safe(b)).dropna()
+    na, nb = len(la_), len(lb_)
+    if na < 2 or nb < 2:
+        return np.nan, np.nan, np.nan, np.nan
+    diff = la_.mean() - lb_.mean()
+    va, vb = la_.var(ddof=1), lb_.var(ddof=1)
+    se = np.sqrt(va / na + vb / nb)
+    dfw = (va / na + vb / nb) ** 2 / ((va / na) ** 2 / (na - 1) + (vb / nb) ** 2 / (nb - 1)) if se > 0 else np.nan
+    t = stats.t.ppf(0.975, dfw) if pd.notna(dfw) else np.nan
+    sp = np.sqrt(((na - 1) * va + (nb - 1) * vb) / (na + nb - 2))
+    g = diff / sp * (1 - 3 / (4 * (na + nb) - 9)) if sp > 0 else np.nan
+    return diff, diff - t * se, diff + t * se, g
+
+
+def compare_groups(df, compounds, treat, control, test, correction, log_for_test=True, min_n=2, paired_by=None):
     """treat vs control を化合物ごとに検定する。
 
     FC = treat の平均 / control の平均 (棒グラフ・ヒートマップの FC と同じ定義)。
     t 検定は log_for_test=True のとき log2 変換後の値に対して行う (濃度は右に裾を引くため)。
-    片方の群で検出数が min_n 未満の化合物は p = NaN とし、多重性補正の対象から外す。
+    効果量は log2 値で: 平均の差 (log2 幾何平均比) とその 95% 信頼区間、Hedges の g。
+    paired_by (列名, 例: 個体ID) を渡すと、その列で対応づけた対応のある検定を行う (対応の取れた個体のみ)。
+    片方の群で値が min_n 未満の化合物は p = NaN とし、多重性補正の対象から外す。
     """
     A, B = df[df[COND_COL] == treat], df[df[COND_COL] == control]
     rows = []
     for c in compounds:
-        a, b = A[c].dropna().astype(float), B[c].dropna().astype(float)
+        if paired_by:
+            a_ = A.set_index(paired_by)[c].astype(float)
+            b_ = B.set_index(paired_by)[c].astype(float)
+            a_, b_ = a_[~a_.index.duplicated()], b_[~b_.index.duplicated()]
+            ids = a_.dropna().index.intersection(b_.dropna().index)
+            a, b = a_.loc[ids], b_.loc[ids]
+        else:
+            a, b = A[c].dropna().astype(float), B[c].dropna().astype(float)
         ma, mb = a.mean(), b.mean()
         fc = ma / mb if mb and pd.notna(mb) and mb != 0 else np.nan
         p = np.nan
         if len(a) >= min_n and len(b) >= min_n:
             ta, tb = a, b
             if log_for_test and "t 検定" in test:
-                ta, tb = pd.Series(log2_safe(a)).dropna(), pd.Series(log2_safe(b)).dropna()
+                ta, tb = pd.Series(log2_safe(a), index=a.index), pd.Series(log2_safe(b), index=b.index)
+                ok = ta.notna() & tb.notna() if paired_by else None
+                ta, tb = (ta[ok], tb[ok]) if paired_by else (ta.dropna(), tb.dropna())
             if len(ta) >= min_n and len(tb) >= min_n and not (np.ptp(ta) == 0 and np.ptp(tb) == 0):
-                with np.errstate(all="ignore"):
-                    p = float(_test(ta, tb, test))
-        rows.append({"化合物": c, "n (" + treat + ")": len(a), "n (" + control + ")": len(b),
+                with np.errstate(all="ignore"), warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    if paired_by:
+                        p = float(stats.ttest_rel(ta, tb).pvalue if test.startswith("対応のある t")
+                                  else stats.wilcoxon(ta, tb).pvalue)
+                    else:
+                        p = float(_test(ta, tb, test))
+        diff, lo, hi, g = _effect(a, b)
+        rows.append({"化合物": c, "比較": f"{treat} vs {control}", "検定": test + (f" (対応: {paired_by})" if paired_by else ""),
+                     "n (" + treat + ")": len(a), "n (" + control + ")": len(b),
                      "平均 (" + treat + ")": ma, "平均 (" + control + ")": mb, "FC": fc,
-                     "log2FC": float(log2_safe([fc])[0]) if pd.notna(fc) else np.nan, "p": p})
+                     "log2FC": float(log2_safe([fc])[0]) if pd.notna(fc) else np.nan,
+                     "log2 幾何平均比": diff, "95% CI 下限": lo, "95% CI 上限": hi, "Hedges g (log2)": g, "p": p})
     res = pd.DataFrame(rows)
     res["q"] = adjust_p(res["p"], CORRECTIONS[correction])
     return res
@@ -270,10 +308,18 @@ def compare_multi(df, compounds, conds, test, correction, log=True, min_n=2):
             row[f"n ({c})"] = len(g)
             row[f"平均 ({c})"] = g.mean() if len(g) else np.nan
         ok = [g for g in groups if len(g) >= min_n]
-        stat, p = (np.nan, np.nan)
+        stat, p, eff = (np.nan, np.nan, np.nan)
         if len(ok) == len(conds) and not all(np.ptp(g) == 0 for g in ok):
             stat, p = _omnibus(ok, test)
-        row["統計量"], row["p"] = stat, p
+            allv = np.concatenate(ok)
+            if test == KRUSKAL:  # ε² = H / (n - 1)
+                eff = stat / (len(allv) - 1) if len(allv) > 1 else np.nan
+            else:  # η² = 群間平方和 / 全平方和
+                sst = ((allv - allv.mean()) ** 2).sum()
+                eff = sum(len(g) * (g.mean() - allv.mean()) ** 2 for g in ok) / sst if sst > 0 else np.nan
+        row["n (合計)"] = int(sum(len(g) for g in groups))
+        row["検定"] = test + (" (log2)" if use_log else "")
+        row["統計量"], row["効果量 (" + ("ε²" if test == KRUSKAL else "η²") + ")"], row["p"] = stat, eff, p
         rows.append(row)
     res = pd.DataFrame(rows)
     res["q"] = adjust_p(res["p"], CORRECTIONS[correction])
@@ -511,6 +557,162 @@ def twoway_anova(df, compounds, label_a="要因A", label_b="要因B", log=True, 
         for name in tr.params.index:
             if name == "Intercept":
                 continue
+            ci = tr.conf_int().loc[name]
             coef_rows.append({"化合物": cpd, "係数": _pretty_term(name, label_a, label_b),
-                              "値": tr.params[name], "標準誤差": tr.bse[name], "p": tr.pvalues[name], "n": len(d)})
+                              "値": tr.params[name], "95% CI 下限": ci[0], "95% CI 上限": ci[1],
+                              "標準誤差": tr.bse[name], "p": tr.pvalues[name], "n": len(d)})
     return pd.DataFrame(anova_rows), pd.DataFrame(coef_rows), skipped
+
+
+# ---------------------------------------------------------------- CCA (探索用: 診断・安定性・制限付き置換)
+def _corr_cols(M, S):
+    return np.array([[np.corrcoef(M[:, j], S[:, c])[0, 1] for c in range(S.shape[1])] for j in range(M.shape[1])])
+
+
+def cca_core(X, Y, reg=0.0):
+    """標準化 -> 正則化 CCA。正準係数・正準スコア・負荷量・交差負荷量を返す (符号は正準相関が正になる向き)。"""
+    Xs, _, _ = _standardize(X)
+    Ys, _, _ = _standardize(Y)
+    A, B = cca_fit(Xs, Ys, reg)
+    U, V = Xs @ A, Ys @ B
+    r = _score_corr(U, V)
+    sign = np.where(r < 0, -1.0, 1.0)
+    B, V, r = B * sign, V * sign, np.abs(r)
+    return dict(r=r, A=A, B=B, U=U, V=V, load_x=_corr_cols(Xs, U), load_y=_corr_cols(Ys, V),
+                cross_x=_corr_cols(Xs, V), cross_y=_corr_cols(Ys, U))
+
+
+def cca_diagnostics(X, Y):
+    """完全ケース数・変数の数・行列の階数・条件数 (標準化後)。"""
+    Xs, _, _ = _standardize(X)
+    Ys, _, _ = _standardize(Y)
+    def cond(M):
+        s = np.linalg.svd(M, compute_uv=False)
+        return float(s[0] / s[-1]) if s[-1] > 1e-12 else np.inf
+    return {"完全ケース数 (行)": X.shape[0], "X の変数の数": X.shape[1], "Y の変数の数": Y.shape[1],
+            "X の階数": int(np.linalg.matrix_rank(Xs)), "Y の階数": int(np.linalg.matrix_rank(Ys)),
+            "X の条件数": cond(Xs), "Y の条件数": cond(Ys),
+            "成分の数 (min(p, q, n-1))": int(min(X.shape[1], Y.shape[1], X.shape[0] - 1))}
+
+
+def cca_permutation(X, Y, reg=0.0, n_perm=999, seed=0, strata=None):
+    """置換検定 (Y の行の対応を入れ替える)。strata を渡すと、その層 (例: condition) の中だけで入れ替える。
+
+    層の中で入れ替えると群間差による見かけの関連を保ったまま、群内の関連を検定する (群構造を無視しない)。
+    """
+    obs = cca_core(X, Y, reg)["r"]
+    rng = np.random.default_rng(seed)
+    Xs, _, _ = _standardize(X)
+    Ys, _, _ = _standardize(Y)
+    idx = np.arange(len(Y))
+    groups = [idx] if strata is None else [idx[np.asarray(strata) == s] for s in pd.unique(np.asarray(strata))]
+    count = np.zeros(len(obs))
+    for _ in range(n_perm):
+        perm = idx.copy()
+        for g in groups:
+            perm[g] = rng.permutation(g)
+        Yp = Ys[perm]
+        Ap, Bp = cca_fit(Xs, Yp, reg)
+        count += np.abs(_score_corr(Xs @ Ap, Yp @ Bp))[:len(obs)] >= obs - 1e-12
+    return (count + 1) / (n_perm + 1)
+
+
+def cca_leave_one_out(X, Y, units, reg=0.0, comps=2, top_k=5, x_names=None, y_names=None):
+    """生物学的単位を 1 つずつ除いて再解析し、負荷量と上位の変数がどれだけ変わるかを調べる (探索結果の安定性)。
+
+    各回の負荷量は、全データでの負荷量との相関が正になるよう符号をそろえる。|相関| が 0.7 未満の回は
+    「対応するモードが不明確」とする。予測性能ではない。
+    """
+    full = cca_core(X, Y, reg)
+    units = np.asarray(units)
+    recs, loads_x, loads_y = [], [], []
+    for u in pd.unique(units):
+        keep = units != u
+        if keep.sum() < 4:
+            continue
+        try:
+            res = cca_core(X[keep], Y[keep], reg)
+        except Exception as e:  # 定数列などで計算できない場合
+            recs.append({"除いた単位": u, "状態": f"計算できない: {e}"})
+            continue
+        row = {"除いた単位": u, "状態": "OK"}
+        for k in range(min(comps, full["load_x"].shape[1], res["load_x"].shape[1])):
+            lf = np.r_[full["load_x"][:, k], full["load_y"][:, k]]
+            lr = np.r_[res["load_x"][:, k], res["load_y"][:, k]]
+            m = np.corrcoef(lf, lr)[0, 1]
+            sgn = -1.0 if m < 0 else 1.0
+            row[f"CV{k + 1} 正準相関"] = res["r"][k]
+            row[f"CV{k + 1} 負荷量の一致 |r|"] = abs(m)
+            row[f"CV{k + 1} 対応"] = "明確" if abs(m) >= 0.7 else "不明確"
+            if k == 0:
+                loads_x.append(res["load_x"][:, 0] * sgn)
+                loads_y.append(res["load_y"][:, 0] * sgn)
+        recs.append(row)
+    summary = pd.DataFrame(recs)
+    stab = []
+    for side, names, full_l, runs in [("X", x_names, full["load_x"][:, 0], loads_x), ("Y", y_names, full["load_y"][:, 0], loads_y)]:
+        if not runs:
+            continue
+        R = np.vstack(runs)
+        top_full = set(np.argsort(-np.abs(full_l))[:top_k])
+        freq = np.mean([np.isin(np.arange(R.shape[1]), np.argsort(-np.abs(r))[:top_k]) for r in R], axis=0)
+        for j in range(R.shape[1]):
+            stab.append({"側": side, "変数": names[j] if names is not None else j, "CV1 負荷量 (全データ)": full_l[j],
+                         "除外再解析の最小": R[:, j].min(), "除外再解析の最大": R[:, j].max(),
+                         "符号が変わった割合": float(np.mean(np.sign(R[:, j]) != np.sign(full_l[j]))),
+                         f"上位 {top_k} に入った割合": float(freq[j]), f"全データで上位 {top_k}": j in top_full})
+    return summary, pd.DataFrame(stab)
+
+
+def cca_cross_validation(X_raw, Y_raw, units, reg=0.0, log_x=False, log_y=False):
+    """生物学的単位で分割した一つ抜き交差検証 (第 1 成分)。補完・標準化・重みの推定は訓練データの中だけで行う。
+
+    X_raw, Y_raw は欠測 (NaN) を含んでよい。補完は訓練データの最小値の 1/2 (負の値を含む列は中央値)。
+    戻り値: 除いた単位で予測した正準変量どうしの相関
+    """
+    units = np.asarray(units)
+    u_out, v_out = [], []
+
+    def prep(train, test, log):
+        tr, te = train.copy(), test.copy()
+        pos = np.nanmin(tr, axis=0) > 0
+        fill = np.where(pos, np.nanmin(tr, axis=0) / 2, np.nanmedian(tr, axis=0))
+        tr = np.where(np.isnan(tr), fill, tr)
+        te = np.where(np.isnan(te), fill, te)
+        if log:
+            tr = np.where(pos, np.log10(np.clip(tr, 1e-300, None)), tr)
+            te = np.where(pos, np.log10(np.clip(te, 1e-300, None)), te)
+        mu, sd = tr.mean(axis=0), tr.std(axis=0, ddof=1)
+        sd = np.where(sd > 0, sd, 1.0)
+        return (tr - mu) / sd, (te - mu) / sd
+
+    for u in pd.unique(units):
+        test = units == u
+        if (~test).sum() < 4:
+            continue
+        Xtr, Xte = prep(X_raw[~test], X_raw[test], log_x)
+        Ytr, Yte = prep(Y_raw[~test], Y_raw[test], log_y)
+        a, b = cca_fit(Xtr, Ytr, reg)
+        a, b = a[:, 0], b[:, 0]
+        b = b * np.sign(np.corrcoef(Xtr @ a, Ytr @ b)[0, 1])
+        u_out += list(Xte @ a)
+        v_out += list(Yte @ b)
+    return float(np.corrcoef(u_out, v_out)[0, 1]) if len(u_out) >= 3 else np.nan
+
+
+def pairwise_correlation_table(X, Y, method="spearman", correction="fdr_bh"):
+    """X の各変数 x Y の各変数の相関・有効 n・欠測数・p・補正後 p (欠測はペアごとに除外)。"""
+    func = stats.spearmanr if method == "spearman" else stats.pearsonr
+    rows = []
+    for a in X.columns:
+        for b in Y.columns:
+            m = X[a].notna() & Y[b].notna()
+            n = int(m.sum())
+            r = p = np.nan
+            if n >= 3 and X.loc[m, a].nunique() > 1 and Y.loc[m, b].nunique() > 1:
+                res = func(X.loc[m, a], Y.loc[m, b])
+                r, p = float(res[0]), float(res[1])
+            rows.append({"X": a, "Y": b, "r": r, "有効 n": n, "欠測数": int(len(m) - n), "p": p})
+    out = pd.DataFrame(rows)
+    out["補正後 p"] = adjust_p(out["p"], correction).values
+    return out

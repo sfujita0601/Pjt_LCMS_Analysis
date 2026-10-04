@@ -35,6 +35,7 @@ def parse_full(raw_bytes):
             row["compound"] = name
             rows.append(row)
     df = pd.DataFrame(rows)
+    df["conc_text"] = df.get("conc", "").astype(str)  # 入力エラー (数値として読めない値) の判定用に元の文字を残す
     for c in NUMERIC:
         if c in df:
             df[c] = pd.to_numeric(df[c].replace({MISSING: np.nan, "(INF)": np.inf}), errors="coerce")
@@ -294,3 +295,131 @@ def apply_limit_mask(df, full, compounds, level, replace, skip=()):
             f = 0.5 if replace == REPL_HALF else 1.0
             out.loc[m, c] = (L * f / ratio)[m]
     return out, n
+
+
+# ---------------------------------------------------------------- 検量線の評価と定量下限の確認
+def calibration_detail(full, max_bias=20.0, max_cv=20.0):
+    """化合物ごとの検量線の情報と、正確さ・精度を実測で確認した定量下限 (LLOQ)。
+
+    - 使用した点: 検量点 (*) が付き、濃度が算出された STD
+    - 除外した点: 検量点が付いていない、または濃度が算出されなかった STD
+    - 検量線の式・重み付け: LabSolutions のエクスポートに含まれないため「未取得」
+    - 確認済み LLOQ: 繰り返し測定 (n >= 2) があり、逆算濃度の平均の偏りが ±max_bias% 以内かつ CV が max_cv% 以下の
+      最も低い濃度。繰り返しが無い濃度は精度を評価できないため確認済みにしない
+    - 推定 LOQ: LabSolutions が S/N = 10 から算出した値 (試料の中央値)。実測確認ではない
+    """
+    std = full[full["is_std"] & full["set_conc"].notna()]
+    rows = []
+    for c, g in std.groupby("compound"):
+        used = g[g["cal_point"] & g["conc"].notna()]
+        excluded = g[~(g["cal_point"] & g["conc"].notna())]
+        levels = []
+        for lv, h in used.groupby("set_conc"):
+            bias = 100 * (h["conc"].mean() / lv - 1)
+            cv = 100 * h["conc"].std() / h["conc"].mean() if len(h) >= 2 else np.nan
+            levels.append((lv, len(h), bias, cv))
+        verified, basis = None, "繰り返し測定のある濃度が無いため未確認"
+        for lv, n, bias, cv in sorted(levels):
+            if n < 2:
+                continue
+            if abs(bias) <= max_bias and cv <= max_cv:
+                verified, basis = lv, f"{lv:g} (n={n}, 偏り {bias:+.1f}%, CV {cv:.1f}%)"
+                break
+            basis = f"{lv:g} で基準外 (n={n}, 偏り {bias:+.1f}%, CV {cv:.1f}%)"
+        samples = full[(~full["is_std"]) & (full["compound"] == c) & (full["loq"] > 0)]
+        rows.append({
+            "化合物": c,
+            "使用した点": ", ".join(f"{lv:g} (n={n})" for lv, n, _, _ in sorted(levels)) or "なし",
+            "除外した点": ", ".join(f"{r['file']}" for _, r in excluded.iterrows()) or "なし",
+            "濃度レベル数": len(levels),
+            "検量線の式・重み付け": "未取得 (エクスポートに含まれない)",
+            "逆算誤差 (各濃度, %)": ", ".join(f"{lv:g}: {b:+.1f}" for lv, _, b, _ in sorted(levels)),
+            "最低濃度の CV%": next((cv for lv, n, b, cv in sorted(levels)), np.nan),
+            "確認済み LLOQ": f"{verified:g}" if verified is not None else "未確認",  # 表示のため文字列で統一
+            "確認の根拠": basis,
+            "推定 LOQ (S/N=10, 中央値)": samples["loq"].median() if len(samples) else np.nan,
+        })
+    return pd.DataFrame(rows)
+
+
+# ---------------------------------------------------------------- QC 試料の評価
+QC_KNOWN, QC_POOL = "既知濃度 QC", "プール QC"
+BLANKS = ["溶媒ブランク", "処理ブランク", "キャリーオーバー確認ブランク"]
+NOT_EVALUATED = "未評価"
+
+
+def qc_evaluation(full, sample_type, inj, thresholds=None, nominal=None, lloq=None):
+    """QC 試料の評価。sample_type: {label: 試料種別}、thresholds: 化合物 -> (CV 上限%, 偏り上限%, キャリーオーバー上限%)。
+
+    - 既知濃度 QC: 偏り (平均 / 理論濃度 - 1) と精度 (CV)。理論濃度 (nominal) が無い化合物は 未評価
+    - プール QC: 精度 (CV) と測定順のドリフト (Spearman)。真値が不明なので正確さは評価しない
+    - ブランク: 検出された値。キャリーオーバー確認ブランクは LLOQ に対する割合 (FDA / ICH M10 の目安 20%)
+    QC が無い項目は「未評価」とし、合格扱いにしない。
+    """
+    from scipy import stats as _st
+
+    thresholds = thresholds or {}
+    d = full[~full["is_std"]].copy()
+    d["種別"] = d[LABEL_COL].map(sample_type).fillna("試料")
+    d = d.merge(inj[["file", "order"]], on="file", how="left")
+    compounds = sorted(full["compound"].unique())
+    rows = []
+    for c in compounds:
+        cv_max, bias_max, carry_max = thresholds.get(c, (15.0, 15.0, 20.0))
+        row = {"化合物": c}
+        pool = d[(d["種別"] == QC_POOL) & (d["compound"] == c)]
+        vals = pool["conc"].dropna()
+        if len(vals) >= 3:
+            cv = 100 * vals.std() / vals.mean()
+            rho = _st.spearmanr(pool.dropna(subset=["conc"])["order"], vals)[0] if len(vals) >= 4 else np.nan
+            row.update({"プール QC n": len(vals), "プール QC CV%": cv, "プール QC ドリフト ρ": rho,
+                        "プール QC 判定": "合格" if cv <= cv_max else "不合格"})
+        else:
+            row.update({"プール QC n": len(vals), "プール QC 判定": NOT_EVALUATED if len(pool) == 0 else "未評価 (n<3)"})
+        known = d[(d["種別"] == QC_KNOWN) & (d["compound"] == c)]
+        nom = (nominal or {}).get(c)
+        kv = known["conc"].dropna()
+        if len(kv) and nom:
+            bias = 100 * (kv.mean() / nom - 1)
+            cv = 100 * kv.std() / kv.mean() if len(kv) >= 2 else np.nan
+            ok = abs(bias) <= bias_max and (np.isnan(cv) or cv <= cv_max)
+            row.update({"既知濃度 QC n": len(kv), "既知濃度 QC 偏り%": bias, "既知濃度 QC CV%": cv,
+                        "既知濃度 QC 判定": ("合格" if ok else "不合格") + (" (精度は未評価)" if np.isnan(cv) else "")})
+        else:
+            row.update({"既知濃度 QC n": len(kv),
+                        "既知濃度 QC 判定": NOT_EVALUATED + (" (理論濃度が未入力)" if len(kv) else "")})
+        blanks = d[d["種別"].isin(BLANKS) & (d["compound"] == c)]
+        if len(blanks):
+            det = blanks["conc"].dropna()
+            row["ブランク 検出数"] = f"{len(det)} / {len(blanks)}"
+            row["ブランク 最大値"] = det.max() if len(det) else np.nan
+            carry = blanks[blanks["種別"] == "キャリーオーバー確認ブランク"]["conc"].dropna()
+            ll = (lloq or {}).get(c)
+            if len(blanks[blanks["種別"] == "キャリーオーバー確認ブランク"]) and isinstance(ll, (int, float)):
+                pct = 100 * (carry.max() if len(carry) else 0) / ll
+                row["キャリーオーバー (% of LLOQ)"] = pct
+                row["キャリーオーバー判定"] = "合格" if pct <= carry_max else "不合格"
+            else:
+                row["キャリーオーバー判定"] = NOT_EVALUATED
+        else:
+            row.update({"ブランク 検出数": NOT_EVALUATED, "キャリーオーバー判定": NOT_EVALUATED})
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def known_qc_table(full, sample_type, nominal, max_bias=15.0, max_cv=15.0):
+    """既知濃度 QC の偏りと精度 (QC の label ごと)。nominal: {QC の label: {化合物: 理論濃度}}"""
+    d = full[~full["is_std"]]
+    rows = []
+    for lb in [k for k, v in sample_type.items() if v == QC_KNOWN]:
+        for c, nom in (nominal.get(lb) or {}).items():
+            v = d[(d[LABEL_COL] == lb) & (d["compound"] == c)]["conc"].dropna()
+            if not nom or not len(v):
+                rows.append({"QC": lb, "化合物": c, "n": len(v), "理論濃度": nom, "判定": NOT_EVALUATED})
+                continue
+            bias = 100 * (v.mean() / nom - 1)
+            cv = 100 * v.std() / v.mean() if len(v) >= 2 else np.nan
+            ok = abs(bias) <= max_bias and (np.isnan(cv) or cv <= max_cv)
+            rows.append({"QC": lb, "化合物": c, "n": len(v), "理論濃度": nom, "平均": v.mean(), "偏り%": bias,
+                         "CV%": cv, "判定": ("合格" if ok else "不合格") + (" (精度は未評価: n<2)" if np.isnan(cv) else "")})
+    return pd.DataFrame(rows)

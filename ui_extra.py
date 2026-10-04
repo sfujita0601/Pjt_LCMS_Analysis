@@ -13,7 +13,8 @@ from lcms_analysis import COND_COL, GROUP_COL, natural_key
 from lcms_plots import PLOT_KINDS, color_map, group_plot, resolve_colormap, resolve_plot_kind, scale
 from make_conc_table import FILE_COL, LABEL_COL
 from ui_common import (
-    colormap_select, compound_picker, current_editor, reset_editor, show_chart, stable_editor, to_csv_bytes,
+    colormap_select, compound_picker, current_editor, register_output, reset_editor, show_chart, stable_editor,
+    to_csv_bytes,
 )
 
 LIM_COLORS = {qc.LIM_ND: "#e1e0d9", qc.LIM_LOD: "#e34948", qc.LIM_LOQ: "#eda100", qc.LIM_OK: "#2a78d6",
@@ -220,6 +221,7 @@ def multigroup_tab(base, groups, conds, compounds, pal, control=None):
     n_sig = int((res["q"] <= q_thr).sum())
     st.markdown(f"**{test}** ・ {group} ・ {len(use)} 群 ・ 補正後 p ≤ {q_thr}: **{n_sig}** 化合物 / 検定 {int(res['p'].notna().sum())}")
     st.dataframe(res.round(5), hide_index=True, height=300)
+    register_output(f"統計/多群比較 {test} ({group})", res)
     st.download_button("全体検定の結果 (CSV)", to_csv_bytes(res), "multigroup.csv", "text/csv", key="_dl_mg")
 
     # 全化合物の事後検定 (一覧)
@@ -410,6 +412,8 @@ def twoway_tab(ds, base, groups, compounds, pal, labels, cond_map):
         st.caption("解析できなかった化合物: " + ", ".join(f"{c} ({r})" for c, r in skipped[:10])
                    + (" ..." if len(skipped) > 10 else ""))
 
+    register_output(f"統計/二元配置 ANOVA 分散分析表 ({group})", anova)
+    register_output(f"統計/二元配置 ANOVA 回帰係数 ({group})", coefs)
     t1, t2 = st.tabs(["分散分析表", "回帰係数"])
     with t1:
         st.dataframe(anova.round(5), hide_index=True, height=300)

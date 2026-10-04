@@ -135,6 +135,9 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("input", help="LabSolutions からエクスポートした .txt")
     ap.add_argument("-o", "--output", help="出力 CSV (既定: 入力名_conc.csv)")
+    ap.add_argument("--is-correct", action="store_true",
+                    help="IS 補正した表も出力する。LabSolutions で外部標準法 (IS 補正なし) を使っている場合だけ指定してください "
+                         "(内部標準法なら二重補正になります)")
     ap.add_argument("--is-output", help="IS 補正後の出力 CSV (既定: 入力名_conc_IS.csv)")
     ap.add_argument("--is-name", default=IS_NAME, help=f"内部標準の化合物名 (既定: {IS_NAME})")
     ap.add_argument("--na", default="", help=f"未検出 ({MISSING}) やデータ欠損を置き換える文字 (既定: 空欄)")
@@ -160,7 +163,10 @@ def main():
     write_csv(out, [FILE_COL, LABEL_COL, DILUTION_COL] + compounds, rows)
     print(f"{len(files)} files x {len(compounds)} compounds -> {out}")
 
-    # 2) 内部標準で補正した換算濃度表 (STD を除く)
+    # 2) 内部標準で補正した換算濃度表 (STD を除く)。定量方式が分からないまま補正しないよう、指定した場合だけ
+    if not args.is_correct:
+        print("IS 補正した表は出力していません (外部標準法で補正が必要な場合は --is-correct を指定)")
+        return
     if args.is_name not in blocks:
         raise SystemExit(f"内部標準 '{args.is_name}' がデータにありません")
     is_out = Path(args.is_output) if args.is_output else Path(f"{stem}_conc_IS.csv")

@@ -232,3 +232,38 @@ def show_chart(container, fig, key=None, width="stretch", **kwargs):
 
 def reset_chart_counter():
     _chart_count[0] = 0
+
+
+# ---------------------------------------------------------------- 出力の登録 (まとめて出力用)
+def register_output(name, df):
+    """各タブで作った表を登録する。サイドバーの「解析結果をまとめて出力」で zip にまとめる。"""
+    st.session_state.setdefault("_outputs", {})[name] = df
+
+
+def reset_outputs():
+    st.session_state["_outputs"] = {}
+
+
+def app_version():
+    """アプリの版: git のコミット (取得できれば) と pyproject の version。"""
+    import subprocess
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent
+    ver = "unknown"
+    try:
+        import tomllib
+
+        ver = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))["project"]["version"]
+    except Exception:
+        pass
+    try:
+        commit = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=root, capture_output=True, text=True,
+                                timeout=5).stdout.strip()
+        dirty = subprocess.run(["git", "status", "--porcelain"], cwd=root, capture_output=True, text=True,
+                               timeout=5).stdout.strip()
+        if commit:
+            ver += f" (git {commit}{' + 未コミットの変更' if dirty else ''})"
+    except Exception:
+        pass
+    return ver

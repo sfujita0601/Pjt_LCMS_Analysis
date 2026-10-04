@@ -45,8 +45,11 @@ def _decode(v, data_dir):
     return v
 
 
-def snapshot(sources, external=()):
-    """現在の設定を dict にする。sources: [(データセット名, bytes)]、external: [(外部データのファイル名, bytes)]"""
+def snapshot(sources, external=(), run_info=None):
+    """現在の設定を dict にする。sources: [(データセット名, bytes)]、external: [(外部データのファイル名, bytes)]
+
+    run_info: アプリの版・処理順序・乱数の種・除外の履歴・適用した補正係数など (再現と記録のため)
+    """
     ss = st.session_state
     widgets, editors = {}, {}
     for k in list(ss.keys()):
@@ -73,7 +76,7 @@ def snapshot(sources, external=()):
         "format": FORMAT, "version": VERSION, "saved_at": datetime.now().isoformat(timespec="seconds"),
         "data": [{"name": n, "sha256": sha256(b), "bytes": len(b)} for n, b in sources],
         "external": [{"name": n, "sha256": sha256(b), "bytes": len(b)} for n, b in external],
-        "packages": versions, "widgets": widgets, "editors": editors,
+        "packages": versions, "run_info": run_info or {}, "widgets": widgets, "editors": editors,
     }
 
 
@@ -128,10 +131,37 @@ def check_data(sources):
                    + "。同じ結果を再現するには、保存時と同じファイルを選んでください。")
 
 
-def saver(sources, external=()):
-    """サイドバーの末尾に置く: 現在の設定を JSON でダウンロードする。"""
-    project = snapshot(sources, external)
+def bundle(project, outputs):
+    """最終濃度表・状態・処理履歴・QC・統計結果・設定と実行情報を 1 つの zip にまとめる。"""
+    import io
+    import zipfile
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("settings_and_run_info.json", json.dumps(project, ensure_ascii=False, indent=1, default=str))
+        index = ["# 出力の一覧", "", f"保存日時: {project.get('saved_at')}", f"アプリの版: {project.get('run_info', {}).get('アプリの版')}", ""]
+        for name, df in outputs.items():
+            if df is None or not hasattr(df, "to_csv"):
+                continue
+            path = name.replace(" ", "_").replace("(", "").replace(")", "") + ".csv"
+            z.writestr(path, df.to_csv(index=not isinstance(df.index, pd.RangeIndex)).encode("utf-8-sig"))
+            index.append(f"- {path} ({len(df)} 行)")
+        index += ["", "図は各図の「図を保存」で個別に保存してください (この zip には含まれません)。"]
+        z.writestr("README.md", "\n".join(index))
+    return buf.getvalue()
+
+
+def saver(sources, external=(), run_info=None):
+    """サイドバーの末尾に置く: 現在の設定を JSON でダウンロードし、解析結果を zip でまとめて出力する。"""
+    project = snapshot(sources, external, run_info)
     st.download_button("解析設定を保存 (.json)", json.dumps(project, ensure_ascii=False, indent=1).encode("utf-8"),
                        f"lcms_project_{datetime.now():%Y%m%d_%H%M}.json", "application/json", key="_dl_project",
                        help="画面の設定・条件設定・検量線の選択・比の定義などを保存します (データ本体は含みません)")
     st.caption(f"保存される設定: {len(project['widgets'])} 項目 + 表 {len(project['editors'])} 個")
+    outputs = st.session_state.get("_outputs") or {}
+    if st.button(f"解析結果をまとめて出力 (zip, 表 {len(outputs)} 個)", key="_btn_bundle",
+                 help="最終濃度表・状態・処理履歴・QC 指標・統計結果・設定と実行情報"):
+        st.session_state["_bundle"] = bundle(project, outputs)
+    if st.session_state.get("_bundle"):
+        st.download_button("zip をダウンロード", st.session_state["_bundle"],
+                           f"lcms_results_{datetime.now():%Y%m%d_%H%M}.zip", "application/zip", key="_dl_bundle")

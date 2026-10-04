@@ -63,7 +63,11 @@ def load_tables(raw_bytes, is_name):
     meta = {f: parse_fname(f) for f in files}
 
     def num(v):
-        return np.nan if v in ("", MISSING) else float(v)
+        # 数値として読めない値 (入力エラー) は欠損にする。状態は lcms_pipeline で「入力エラー」として記録する
+        try:
+            return np.nan if v in ("", MISSING) else float(v)
+        except ValueError:
+            return np.nan
 
     raw = pd.DataFrame(
         [[f, *meta[f]] + [num(blocks[c].get(f, "")) for c in compounds] for f in files],
