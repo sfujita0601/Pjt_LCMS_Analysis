@@ -97,7 +97,7 @@ def sort_compounds(compounds, mode):
 
 
 def _sort_select(container, key):
-    return container.selectbox("並べ方", SORT_CHOICES, key=f"{key}_sort",
+    return container.selectbox("並べ方", SORT_CHOICES, key=f"{key}_cpdsort",
                                help="|log2FC| は 対照群 (条件設定タブ) との比較。希釈グループ・condition の中で最大の値")
 
 
