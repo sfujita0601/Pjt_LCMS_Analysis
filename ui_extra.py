@@ -149,11 +149,12 @@ def ratio_view(base, ratios, groups, conds, pal, na_rep):
     sub = base[base[GROUP_COL] == group].copy()
     sub[COND_COL] = sub[COND_COL].replace("", "未設定")
     cats = [c for c in conds + ["未設定"] if (sub[COND_COL] == c).any()]
-    kind, pts, logy = plot_controls("ratio", False)
+    kind, pts, ymode = plot_controls("ratio", False)
     cols = st.columns(min(2, max(1, len(sel))))
     for i, r in enumerate(sel):
-        fig = group_plot(sub, r, COND_COL, cats, LABEL_COL, pal, kind, pts, logy)
-        fig.update_layout(height=380, title=r, yaxis_title=r, margin=dict(t=40))
+        pv, ylab, logy = plot_values(sub, r, ymode)
+        fig = group_plot(pv, r, COND_COL, cats, LABEL_COL, pal, kind, pts, logy)
+        fig.update_layout(height=380, title=r, yaxis_title=ylab, margin=dict(t=40))
         show_chart(cols[i % len(cols)], fig, width="stretch", key=f"ratio_fig_{i}")
     st.caption("箱ひげ図: 箱 = 中央値と四分位、ひげ = 1.5 IQR。点 = 各サンプル。"
                "サイドバーではなくこのタブの「比を他の解析にも追加」をオンにすると、棒グラフ・ボルケーノなどでも化合物と同様に扱えます。")
@@ -161,13 +162,25 @@ def ratio_view(base, ratios, groups, conds, pal, na_rep):
 
 # ---------------------------------------------------------------- 3 群以上の比較
 def plot_controls(key, parametric):
-    """検定と一緒に載せる図の種類を選ぶ。(図の種類, 点を重ねるか, 縦軸を対数か) を返す。"""
+    """検定と一緒に載せる図の種類を選ぶ。(図の種類, 点を重ねるか, 縦軸の扱い) を返す。
+
+    縦軸の扱い: "そのまま" / "log2 変換" (値を log2 にする) / "対数軸 (log10)" (値はそのままで目盛りを対数に)
+    """
     c1, c2, c3 = st.columns([2, 1, 1])
     kind = c1.selectbox("図の種類", PLOT_KINDS, key=f"{key}_plot",
                         help="自動: 平均を比べる検定 (t 検定・ANOVA) は 平均 ± SD の棒グラフ、順位に基づく検定は箱ひげ図")
     pts = c2.checkbox("各サンプルの点を重ねる", value=True, key=f"{key}_plot_pts")
-    logy = c3.checkbox("縦軸を対数", value=False, key=f"{key}_plot_log")
-    return resolve_plot_kind(kind, parametric), pts, logy
+    ymode = c3.selectbox("縦軸", ["そのまま", "log2 変換", "対数軸 (log10)"], key=f"{key}_plot_ymode")
+    return resolve_plot_kind(kind, parametric), pts, ymode
+
+
+def plot_values(df, col, ymode):
+    """縦軸の扱いに合わせて値を用意する。(表, 縦軸の名前, 対数軸か)"""
+    if ymode == "log2 変換":
+        out = df.copy()
+        out[col] = np.where(out[col] > 0, np.log2(out[col].where(out[col] > 0)), np.nan)
+        return out, f"log2({col})", False
+    return df, col, ymode.startswith("対数軸")
 
 
 def add_brackets(fig, pairs, groups, ymax, pal, logy=False):
@@ -242,16 +255,17 @@ def multigroup_tab(base, groups, conds, compounds, pal, control=None):
     if not cands:
         return
     cpd = st.selectbox("化合物 (p の小さい順)", cands, key="mg_cpd")
-    kind, pts, logy = plot_controls("mg", test in ls.PARAMETRIC)
+    kind, pts, ymode = plot_controls("mg", test in ls.PARAMETRIC)
     pw = ls.posthoc(sub, cpd, use, ph, ph_corr, log, control=ctrl)
     c1, c2 = st.columns([3, 2])
-    fig = group_plot(sub, cpd, COND_COL, use, LABEL_COL, pal, kind, pts, logy)
+    pv, ylab, logy = plot_values(sub, cpd, ymode)
+    fig = group_plot(pv, cpd, COND_COL, use, LABEL_COL, pal, kind, pts, logy)
     sig = [] if pw.empty else [(r["群1"], r["群2"], r["補正後 p"]) for _, r in pw.iterrows() if r["補正後 p"] <= q_thr]
-    ymax = float(np.nanmax(sub[cpd])) if sub[cpd].notna().any() else 1.0
+    ymax = float(np.nanmax(pv[cpd])) if pv[cpd].notna().any() else 1.0
     add_brackets(fig, sig, use, ymax, pal, logy)
     row = res[res["化合物"] == cpd].iloc[0]
     fig.update_layout(height=480, title=f"{cpd} ・ {test}: p = {row['p']:.3g} (補正後 {row['q']:.3g})",
-                      yaxis_title=cpd, margin=dict(t=50))
+                      yaxis_title=ylab, margin=dict(t=50))
     show_chart(c1, fig, width="stretch")
     c1.caption(f"{kind}。{star_legend()} ({ph}"
                + (f", {ph_corr}" if ph in ls.POSTHOC_NEEDS_ADJUST else "") + (f", 対照群 {ctrl}" if ctrl else "")

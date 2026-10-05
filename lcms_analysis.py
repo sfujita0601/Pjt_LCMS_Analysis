@@ -28,6 +28,9 @@ VALUE_COL = "値"
 CONC = "濃度"
 FC = "Fold Change"
 LOG2FC = "log2(Fold Change)"
+LOG2CONC = "log2(濃度)"
+LOG_NONE, LOG2, LOG10 = "なし", "log2", "log10"
+LOG_CHOICES = [LOG2, LOG10, LOG_NONE]
 # 要約統計量
 MEAN_SD = "平均 ± SD"
 MEDIAN_IQR = "中央値 + IQR"
@@ -151,9 +154,13 @@ def log2_safe(x):
 
 
 def transform_values(base, compounds, kind, control):
-    """kind (濃度 / FC / log2FC) に応じてサンプルごとの値を変換する。"""
+    """kind (濃度 / log2(濃度) / FC / log2FC) に応じてサンプルごとの値を変換する。"""
     if kind == CONC:
         return base
+    if kind == LOG2CONC:
+        out = base.copy()
+        out[compounds] = log2_safe(out[compounds].values)
+        return out
     out = to_fold_change(base, compounds, control)
     if kind == LOG2FC:
         out[compounds] = log2_safe(out[compounds].values)
@@ -199,8 +206,8 @@ def zscore_cols(X):
     return (X.loc[:, keep] - X.loc[:, keep].mean()) / sd[keep]
 
 
-def log10_safe(X):
-    """log10 変換。0 は最小の正の値の 1/2 に置き換える。負の値を含む列 (Z スコアなどの外部データ) は変換しない。"""
+def log_safe(X, base=10):
+    """対数変換 (base = 2 または 10)。0 は最小の正の値の 1/2 に置き換える。負の値を含む列 (Z スコアなど) は変換しない。"""
     X = X.astype(float)
     cols = [c for c in X.columns if not (X[c] < 0).any()]
     if not cols:
@@ -209,8 +216,21 @@ def log10_safe(X):
     pos = P[P > 0].min().min()
     out = X.copy()
     if pd.notna(pos):
-        out[cols] = np.log10(P.clip(lower=pos / 2))
+        out[cols] = np.log(P.clip(lower=pos / 2)) / np.log(base)
     return out
+
+
+def log10_safe(X):
+    return log_safe(X, 10)
+
+
+def apply_log(X, mode):
+    """mode: "log2" / "log10" / "なし" (True は log10 とみなす: 以前の版の設定との互換)。"""
+    if mode is True or mode == LOG10:
+        return log_safe(X, 10)
+    if mode == LOG2:
+        return log_safe(X, 2)
+    return X
 
 
 def prep_matrix(df, compounds, max_missing, impute, log, zscore, index=None):
@@ -222,8 +242,7 @@ def prep_matrix(df, compounds, max_missing, impute, log, zscore, index=None):
         X = X.fillna(X.min() / 2)
     elif impute == "0":
         X = X.fillna(0)
-    if log:
-        X = log10_safe(X)
+    X = apply_log(X, log)
     if zscore:
         X = zscore_cols(X)
     return X
@@ -344,3 +363,24 @@ GROUP_PRESETS = {
 
 def parse_members(text):
     return [t.strip() for t in str(text or "").split(";") if t.strip()]
+
+
+def compound_stats(base, compounds, control=None):
+    """化合物の並べ替えに使う指標: 平均・変動係数 CV% と、対照群との |log2FC| の最大値 (希釈グループ・condition ごと)。"""
+    rows = {}
+    for c in compounds:
+        v = pd.to_numeric(base[c], errors="coerce")
+        m = v.mean()
+        cv = 100 * v.std() / m if m and pd.notna(m) else np.nan
+        best = np.nan
+        if control is not None and COND_COL in base:
+            for _, g in base.groupby(GROUP_COL):
+                means = g.groupby(COND_COL)[c].mean()
+                ref = means.get(control, np.nan)
+                for cond, mv in means.items():
+                    if cond in (control, "") or not (ref > 0 and mv > 0):
+                        continue
+                    val = abs(np.log2(mv / ref))
+                    best = val if np.isnan(best) else max(best, val)
+        rows[c] = {"|log2FC|": best, "平均": m, "CV%": cv}
+    return pd.DataFrame.from_dict(rows, orient="index")

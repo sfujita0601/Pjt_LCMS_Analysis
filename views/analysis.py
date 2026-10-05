@@ -13,12 +13,13 @@ import lcms_pipeline as lp
 import lcms_qc as qc
 import lcms_stats as ls
 from lcms_analysis import (
-    CONC, COND_COL, CPD_COL, DATASET_COL, FC, GROUP_COL, LOG2FC, MEAN_SD, MEDIAN_IQR, VALUE_COL,
+    CONC, COND_COL, CPD_COL, DATASET_COL, FC, GROUP_COL, LOG2CONC, LOG2FC, MEAN_SD, MEDIAN_IQR, VALUE_COL,
 )
 from lcms_plots import bar_samples, bar_summary, clustered_heatmap, heatmap_grid, resolve_colormap, scale, scatter_2d
 from make_conc_table import FILE_COL, IS_NAME, LABEL_COL, MISSING, is_std
 from ui_common import (
-    app_version, colormap_select, colorscale_for, compound_picker, compound_select, figure_settings, register_output, reset_chart_counter, reset_outputs, show_chart, significance_settings, theme, to_csv_bytes,
+    app_version, colormap_select, colorscale_for, compound_picker, compound_select, figure_settings, register_output,
+    reset_chart_counter, reset_outputs, set_compound_stats, show_chart, significance_settings, theme, to_csv_bytes,
 )
 from ui_qc import accuracy_tab, calibration_choices, calibration_tab, drift_tab, provenance_tab, qc_tab
 from ui_external import cca_tab, external_tab, groups_tab, merge_external
@@ -519,6 +520,7 @@ def single_mode(d):
         st.sidebar.caption(f"解析に使う label: {n_used} / {n_all}")
     groups = la.group_order(base[GROUP_COL])
     has_control = control is not None and (base[COND_COL] == control).any()
+    set_compound_stats(la.compound_stats(base, compounds, control if has_control else None))
     st.caption(
         f"{d['name']} ・ 解析対象 {len(base)} サンプル ・ 検出化合物 {len(compounds)} / {len(d['compounds'])} ・ "
         f"希釈グループ: {', '.join(f'{g} (n={(base[GROUP_COL] == g).sum()})' for g in groups)} ・ "
@@ -563,7 +565,7 @@ def single_mode(d):
 
     # ------------------------------------------------ 棒グラフ
     with tab_bar:
-        by_cond, kind, stat = view_controls("bar", has_control, [CONC, FC, LOG2FC])
+        by_cond, kind, stat = view_controls("bar", has_control, [CONC, LOG2CONC, FC, LOG2FC])
         c1, c2 = st.columns([4, 1])
         with c1:
             sel = compound_select("bar_cpds", compounds, default=compounds[:1], max_selections=40)
@@ -599,7 +601,7 @@ def single_mode(d):
     # ------------------------------------------------ ヒートマップ
     with tab_hm:
         by_cond, kind, stat = view_controls(
-            "hm", has_control, [CONC, "log10", "Z スコア (化合物ごと)", FC, LOG2FC])
+            "hm", has_control, [CONC, LOG2CONC, "log10", "Z スコア (化合物ごと)", FC, LOG2FC])
         hm_cpds = compound_picker("hm", compounds)
         c1, c2, c3 = st.columns([4, 1, 1])
         with c2:
@@ -607,7 +609,7 @@ def single_mode(d):
         limit = c3.number_input("色の上限 |log2FC| (0 = 自動)", 0.0, 20.0, 0.0, 0.5, key="hm_lim",
                                 disabled=kind != LOG2FC)
         mats, hovers = {}, {}
-        lin_kind = kind if kind in (FC, LOG2FC) else CONC
+        lin_kind = kind if kind in (FC, LOG2FC, LOG2CONC) else CONC
         for g in groups:
             sub = base[base[GROUP_COL] == g]
             if by_cond:
@@ -671,7 +673,7 @@ def single_mode(d):
                             help="p = 1 でマンハッタン、p = 2 でユークリッドと同じ")
         with c4:
             cmap = colormap_select("cl_cmap")
-        if metric == "braycurtis" and (opts["scaling"] != "なし" or opts["log"]):
+        if metric == "braycurtis" and (opts["scaling"] != "なし" or opts["log"] != la.LOG_NONE):
             st.warning("ブレイ・カーティス距離は非負の値 (濃度そのまま) を前提とします。"
                        "前処理の log10 変換・スケーリングをオフにしてください。")
         if metric == "mahalanobis":
@@ -766,6 +768,9 @@ def caption_for(kind, stat):
     rng = "誤差棒 = SD" if stat == MEAN_SD else "誤差棒 = 第1–第3四分位 (IQR)"
     if kind == CONC:
         return f"棒 = {stat_label(stat)}、{rng}。"
+    if kind == LOG2CONC:
+        return (f"棒 = log2(濃度) の{stat_label(stat)} (平均なら幾何平均の log2)、{rng} (log2 値で計算)。"
+                "未検出・0 以下の値は除いています。")
     base = f"FC = 各サンプル / 同じ希釈グループの対照群平均。棒 = FC の{stat_label(stat)}、{rng}。"
     if kind == LOG2FC:
         base += " log2(FC) は FC スケールで求めた値を log2 変換しています (下端が 0 以下になる誤差棒は省略)。"
@@ -778,7 +783,8 @@ def prep_controls(key, compounds):
         c1, c2, c3, c4 = st.columns(4)
         max_missing = c1.slider("欠損率がこれ以下の化合物を使用", 0.0, 1.0, 0.5, 0.05, key=f"{key}_miss")
         impute = c2.selectbox("欠損値の補完", ["最小値の1/2", "0"], key=f"{key}_imp")
-        log = c3.checkbox("log10 変換", value=True, key=f"{key}_log")
+        log = c3.selectbox("対数変換", la.LOG_CHOICES, index=1, key=f"{key}_logmode",
+                           help="log2 と log10 は定数倍の違いなので、Z スコア化すると結果は同じです")
         scaling = c4.selectbox("スケーリング (化合物ごと)", ls.SCALINGS, index=1, key=f"{key}_scale",
                                help="van den Berg et al. (2006)。詳しくは「解析手法の解説」ページ")
     return dict(max_missing=max_missing, impute=impute, log=log, scaling=scaling, compounds=cpds)

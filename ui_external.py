@@ -244,8 +244,8 @@ def cca_tab(base, groups, dil_groups, conds, pal):
     dil = c3.selectbox("希釈グループ", dil_groups, key="cca_dil")
     use = c4.multiselect("使う condition (空欄 = 全サンプル)", conds, key="cca_conds")
     c1, c2, c3, c4 = st.columns(4)
-    log_x = c1.checkbox("X を log10 変換", value=True, key="cca_logx")
-    log_y = c2.checkbox("Y を log10 変換", value=True, key="cca_logy", help="負の値を含む列は変換しません")
+    log_x = c1.selectbox("X の対数変換", la.LOG_CHOICES, index=1, key="cca_logx_mode")
+    log_y = c2.selectbox("Y の対数変換", la.LOG_CHOICES, index=1, key="cca_logy_mode", help="負の値を含む列は変換しません")
     reg = c3.slider("正則化 (0 = 古典的 CCA)", 0.0, 0.95, 0.5, 0.05, key="cca_reg",
                     help="共分散を単位行列に近づける強さ (canonical ridge)。変数がサンプル数に比べて多いときに推奨")
     max_missing = c4.slider("欠測率がこれ以下の変数を使用", 0.0, 1.0, 0.5, 0.05, key="cca_miss")
@@ -276,8 +276,8 @@ def cca_tab(base, groups, dil_groups, conds, pal):
     dropped_rows = sorted(sub.loc[~ok.values, LABEL_COL])
     sub, X0, Y0 = sub[ok.values], X0[ok.values], Y0[ok.values]
     # 補完 (正の値の列は最小値の 1/2、負の値を含む列は中央値) -> 対数変換 (正の値の列のみ)
-    X = la.log10_safe(_impute(X0)) if log_x else _impute(X0)
-    Y = la.log10_safe(_impute(Y0)) if log_y else _impute(Y0)
+    X = la.apply_log(_impute(X0), log_x)
+    Y = la.apply_log(_impute(Y0), log_y)
     units = sub["個体ID"].values if "個体ID" in sub else sub[LABEL_COL].values
     n, p, q = len(sub), X.shape[1], Y.shape[1]
     simulated = _simulated(list(X.columns) + list(Y.columns))
@@ -316,7 +316,7 @@ def cca_tab(base, groups, dil_groups, conds, pal):
             X.values, Y.values, tuple(units), reg, perm_mode if not repeated else "行わない", int(n_perm), strata,
             tuple(X.columns), tuple(Y.columns), do_cv, X0.values, Y0.values, log_x, log_y)
     diag_rows.update({k: v for k, v in diag.items() if k not in diag_rows})
-    st.dataframe(pd.DataFrame({"項目": list(diag_rows), "値": [f"{v:.3g}" if isinstance(v, float) else v
+    st.dataframe(pd.DataFrame({"項目": list(diag_rows), "値": [f"{v:.3g}" if isinstance(v, float) else str(v)
                                                              for v in diag_rows.values()]}), hide_index=True)
     if warns:
         st.caption("数値計算の警告: " + "; ".join(sorted({str(w.message)[:80] for w in warns})))

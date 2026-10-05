@@ -1,5 +1,6 @@
 """Streamlit 画面で共通に使う部品。"""
 import numpy as np
+import pandas as pd
 import streamlit as st
 
 from lcms_analysis import FC, GROUP_PRESETS, LOG2FC
@@ -59,7 +60,7 @@ def colorscale_for(kind, pal, values, limit=0.0, cmap="既定"):
         return div, "FC", 1, None
     if kind == "Z スコア (化合物ごと)":
         return div, "Z", 0, None
-    return seq, "log10 濃度" if kind == "log10" else "濃度", None, None
+    return seq, {"log10": "log10 濃度", "log2(濃度)": "log2 濃度"}.get(kind, "濃度"), None, None
 
 
 def symmetric_limit(values, limit=0.0):
@@ -69,6 +70,35 @@ def symmetric_limit(values, limit=0.0):
 
 
 PICK_ALL, PICK_ONLY, PICK_EXCLUDE = "すべて", "選んだ化合物のみ", "選んだ化合物を除外"
+SORT_DATA, SORT_NAME = "データの順", "名前順"
+SORT_STATS = {"|log2FC| の大きい順 (対照群との比較)": "|log2FC|", "平均の大きい順": "平均", "変動係数 CV の大きい順": "CV%"}
+SORT_CHOICES = [SORT_DATA, SORT_NAME] + list(SORT_STATS)
+
+
+def set_compound_stats(df):
+    """化合物の並べ替えに使う指標 (index = 化合物, 列 = |log2FC|, 平均, CV%)。"""
+    st.session_state["_cpd_stats"] = df
+
+
+def sort_compounds(compounds, mode):
+    """並べ方に従って化合物を並べ、(並べた一覧, 表示名の関数) を返す。"""
+    from lcms_analysis import natural_key
+
+    compounds = list(compounds)
+    if mode == SORT_NAME:
+        return sorted(compounds, key=natural_key), str
+    col = SORT_STATS.get(mode)
+    stats = st.session_state.get("_cpd_stats")
+    if not col or stats is None or col not in stats:
+        return compounds, str
+    v = stats[col].reindex(compounds)
+    order = sorted(compounds, key=lambda c: (pd.isna(v[c]), -abs(v[c]) if pd.notna(v[c]) else 0.0))
+    return order, (lambda c: f"{c} ({col} {v[c]:.3g})" if pd.notna(v.get(c, np.nan)) else f"{c} ({col} なし)")
+
+
+def _sort_select(container, key):
+    return container.selectbox("並べ方", SORT_CHOICES, key=f"{key}_sort",
+                               help="|log2FC| は 対照群 (条件設定タブ) との比較。希釈グループ・condition の中で最大の値")
 
 
 def available_groups(compounds):
@@ -96,10 +126,16 @@ def _group_select(container, key, compounds, disabled=False):
 
 
 def compound_select(key, compounds, default=None, label="化合物", max_selections=None):
-    """図に描く化合物を選ぶ (個別 + グループ)。選んだ順 (グループは分類の順) のリストを返す。"""
-    c1, c2 = st.columns([3, 2])
-    sel = c1.multiselect(label, compounds, default=default, key=key, placeholder="化合物を選択 (名前の一部で検索できます)")
+    """図に描く化合物を選ぶ (個別 + グループ)。並べ方が「データの順」以外なら、その順に並べて返す。"""
+    c1, c2, c3 = st.columns([3, 2, 1.4])
+    mode = _sort_select(c3, key)
+    ordered, fmt = sort_compounds(compounds, mode)
+    sel = c1.multiselect(label, ordered, default=default, key=key, format_func=fmt,
+                         placeholder="化合物を選択 (名前の一部で検索できます)")
     out = list(dict.fromkeys(list(sel) + _group_select(c2, key, compounds)))
+    if mode != SORT_DATA:
+        rank = {c: i for i, c in enumerate(ordered)}
+        out = sorted(out, key=lambda c: rank.get(c, len(rank)))
     if max_selections and len(out) > max_selections:
         st.warning(f"表示できるのは {max_selections} 個までです。最初の {max_selections} 個を表示します。")
         out = out[:max_selections]
@@ -110,7 +146,9 @@ def compound_picker(key, compounds, label="対象の化合物"):
     """解析の対象にする化合物を選ぶ (すべて / 選んだものだけ / 選んだものを除く)。"""
     c1, c2 = st.columns([1, 3])
     mode = c1.radio(label, [PICK_ALL, PICK_ONLY, PICK_EXCLUDE], key=f"{key}_cmode")
-    sel = c2.multiselect("化合物", compounds, key=f"{key}_csel", disabled=mode == PICK_ALL,
+    sort_mode = _sort_select(c1, key)
+    ordered, fmt = sort_compounds(compounds, sort_mode)
+    sel = c2.multiselect("化合物", ordered, key=f"{key}_csel", disabled=mode == PICK_ALL, format_func=fmt,
                          placeholder="化合物を選択 (名前の一部を入力して検索できます)")
     sel = list(dict.fromkeys(list(sel) + _group_select(c2, key, compounds, disabled=mode == PICK_ALL)))
     if mode == PICK_ONLY:

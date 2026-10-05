@@ -14,7 +14,7 @@ from scipy.spatial.distance import squareform
 
 import lcms_kegg as lk
 import lcms_stats as ls
-from lcms_analysis import COND_COL, GROUP_COL, log10_safe, natural_key
+from lcms_analysis import COND_COL, GROUP_COL, LOG_CHOICES, apply_log, natural_key
 from lcms_plots import color_map, resolve_colormap, scale
 from make_conc_table import LABEL_COL
 from lcms_plots import group_plot
@@ -86,18 +86,18 @@ def volcano_tab(base, groups, conds, control, compounds, pal):
     st.download_button("検定結果 (CSV)", to_csv_bytes(out), f"volcano_{treat}_vs_{control}.csv", "text/csv", key="_dl_vol")
 
     st.subheader("化合物ごとの比較")
-    from ui_extra import add_brackets, plot_controls  # 循環 import を避けるためここで読み込む
+    from ui_extra import add_brackets, plot_controls, plot_values  # 循環 import を避けるためここで読み込む
 
     cands = list(out.loc[out["p"].notna(), "化合物"])
     if cands:
         cpd = st.selectbox("化合物 (p の小さい順)", cands, key="vol_cpd")
-        kind, pts, logy = plot_controls("vol", "t 検定" in test)
-        two = sub[sub[COND_COL].isin([control, treat])]
+        kind, pts, ymode = plot_controls("vol", "t 検定" in test)
+        two, ylab, logy = plot_values(sub[sub[COND_COL].isin([control, treat])], cpd, ymode)
         fig = group_plot(two, cpd, COND_COL, [control, treat], LABEL_COL, pal, kind, pts, logy)
         r = out[out["化合物"] == cpd].iloc[0]
         if r["q"] <= q_thr:
             add_brackets(fig, [(control, treat, r["q"])], [control, treat], float(np.nanmax(two[cpd])), pal, logy)
-        fig.update_layout(height=440, yaxis_title=cpd, margin=dict(t=50),
+        fig.update_layout(height=440, yaxis_title=ylab, margin=dict(t=50),
                           title=f"{cpd} ・ {test}: p = {r['p']:.3g} (補正後 {r['q']:.3g}) ・ FC = {r['FC']:.3g}")
         c1, c2 = st.columns([2, 1])
         show_chart(c1, fig, width="stretch")
@@ -157,8 +157,9 @@ def scatter_tab(base, groups, conds, compounds, pal):
     y = c3.selectbox("縦軸の化合物", compounds, index=1, key="sc_y")
     color_by = c4.radio("色分け", ["condition", "なし"], key="sc_color", horizontal=True)
     c1, c2, c3, c4, c5 = st.columns(5)
-    logx = c1.checkbox("横軸を対数", value=False, key="sc_logx")
-    logy = c2.checkbox("縦軸を対数", value=False, key="sc_logy")
+    xmode = c1.selectbox("横軸", ["そのまま", "log2 変換", "対数軸 (log10)"], key="sc_xmode", help="log2 変換は値を変換、対数軸は値はそのままで軸の目盛りを対数にします")
+    ymode = c2.selectbox("縦軸", ["そのまま", "log2 変換", "対数軸 (log10)"], key="sc_ymode")
+    logx, logy = xmode.startswith("対数軸"), ymode.startswith("対数軸")
     fit = c3.selectbox("回帰直線", ["全体", "condition ごと", "なし"], key="sc_fit")
     method = c4.selectbox("相関係数", ["Spearman", "Pearson"], key="sc_method",
                           help="対数軸のときは Pearson も対数値で計算します")
@@ -170,10 +171,17 @@ def scatter_tab(base, groups, conds, compounds, pal):
     sub = base[base[GROUP_COL] == group].copy()
     sub[COND_COL] = sub[COND_COL].replace("", UNSET_COND)
     d = sub[[LABEL_COL, COND_COL, x, y]].dropna()
-    if logx:
+    if xmode != "そのまま":
         d = d[d[x] > 0]
-    if logy:
+    if ymode != "そのまま":
         d = d[d[y] > 0]
+    d = d.copy()
+    if xmode == "log2 変換":
+        d[x] = np.log2(d[x])
+    if ymode == "log2 変換":
+        d[y] = np.log2(d[y])
+    xlab = f"log2({x})" if xmode == "log2 変換" else x
+    ylab = f"log2({y})" if ymode == "log2 変換" else y
     if len(d) < 2:
         st.warning("両方の化合物が検出されたサンプルが 2 つ未満です")
         return
@@ -201,8 +209,8 @@ def scatter_tab(base, groups, conds, compounds, pal):
         fig.add_trace(go.Scatter(x=xs, y=ys, mode="lines", name="回帰直線 (全体)",
                                  line=dict(color=pal["line"], width=2, dash="dash"), hoverinfo="skip"))
         title += f" ・ {method}: {_corr_text(tx(d[x], logx), tx(d[y], logy), method)}"
-    fig.update_xaxes(title=x, type="log" if logx else "linear")
-    fig.update_yaxes(title=y, type="log" if logy else "linear")
+    fig.update_xaxes(title=xlab, type="log" if logx else "linear")
+    fig.update_yaxes(title=ylab, type="log" if logy else "linear")
     fig.update_layout(height=560, title=title, legend_title_text="condition" if color_by == "condition" else "")
     if square:
         make_square(fig, d[x], d[y], logx, logy, size)
@@ -270,7 +278,7 @@ def correlation_tab(base, groups, conds, compounds, pal, vres):
     method = c3.selectbox("相関係数", list(ls.CORR_METHODS), key="cor_method")
     min_pairs = c4.number_input("最小サンプル数 (ペアごと)", 3, 100, 6, key="cor_min",
                                 help="両方の化合物が検出されたサンプルがこの数未満のペアは計算しません")
-    log = c1.checkbox("log10 変換してから計算", value=True, key="cor_log",
+    log = c1.selectbox("対数変換してから計算", LOG_CHOICES, index=1, key="cor_logmode",
                       help="Pearson は外れ値に敏感なので対数変換を推奨。Spearman / Kendall は順位を使うので結果は変わりません")
 
     compounds = compound_picker("cor", compounds)
@@ -282,8 +290,7 @@ def correlation_tab(base, groups, conds, compounds, pal, vres):
     if X.shape[1] < 3:
         st.warning("相関を計算できる化合物が足りません")
         return
-    if log:
-        X = log10_safe(X)
+    X = apply_log(X, log)
     R, P, N = _correlation(X, ls.CORR_METHODS[method], int(min_pairs))
     st.caption(f"{len(sub)} サンプル x {X.shape[1]} 化合物 ・ {method} の相関係数")
 

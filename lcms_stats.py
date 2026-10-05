@@ -679,9 +679,11 @@ def cca_cross_validation(X_raw, Y_raw, units, reg=0.0, log_x=False, log_y=False)
         fill = np.where(pos, np.nanmin(tr, axis=0) / 2, np.nanmedian(tr, axis=0))
         tr = np.where(np.isnan(tr), fill, tr)
         te = np.where(np.isnan(te), fill, te)
-        if log:
-            tr = np.where(pos, np.log10(np.clip(tr, 1e-300, None)), tr)
-            te = np.where(pos, np.log10(np.clip(te, 1e-300, None)), te)
+        if log:  # log: "log2" / "log10" / True (= log10) / "なし" / False
+            b = 2.0 if log == "log2" else (None if log == "なし" else 10.0)
+            if b:
+                tr = np.where(pos, np.log(np.clip(tr, 1e-300, None)) / np.log(b), tr)
+                te = np.where(pos, np.log(np.clip(te, 1e-300, None)) / np.log(b), te)
         mu, sd = tr.mean(axis=0), tr.std(axis=0, ddof=1)
         sd = np.where(sd > 0, sd, 1.0)
         return (tr - mu) / sd, (te - mu) / sd
