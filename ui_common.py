@@ -344,3 +344,23 @@ def stars(p):
 def star_legend():
     s1, s2, s3 = star_cutoffs()
     return f"* 補正後 p < {s1:g}, ** < {s2:g}, *** < {s3:g}"
+
+
+# ---------------------------------------------------------------- 「使用」を外した試料の表示
+def unused_toggle(key, used, labels):
+    """「使用」を外した試料も表示するか。外した試料が無ければ何も出さず True (= 絞り込み不要) を返す。"""
+    off = sorted(set(labels) - set(used or labels))
+    if not off:
+        return True
+    return st.checkbox(f"「使用」を外した試料も表示 ({len(off)} 件: {', '.join(off[:5])}{' ...' if len(off) > 5 else ''})",
+                       value=False, key=f"{key}_show_unused")
+
+
+def keep_used(df, used, show_all, label_col="label", std_col=None):
+    """解析に使う試料 (と STD) の行だけ残す。show_all なら全部残す。"""
+    if show_all or used is None:
+        return df
+    from make_conc_table import is_std
+
+    is_s = df[std_col] if std_col else df[label_col].map(is_std)
+    return df[is_s | df[label_col].isin(used)]

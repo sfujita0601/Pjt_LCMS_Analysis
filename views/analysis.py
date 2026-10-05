@@ -18,8 +18,9 @@ from lcms_analysis import (
 from lcms_plots import bar_samples, bar_summary, clustered_heatmap, heatmap_grid, resolve_colormap, scale, scatter_2d
 from make_conc_table import FILE_COL, IS_NAME, LABEL_COL, MISSING, is_std
 from ui_common import (
-    app_version, colormap_select, colorscale_for, compound_picker, compound_select, figure_settings, register_output,
-    reset_chart_counter, reset_outputs, set_compound_stats, show_chart, significance_settings, theme, to_csv_bytes,
+    app_version, colormap_select, colorscale_for, compound_picker, compound_select, figure_settings, keep_used,
+    register_output, reset_chart_counter, reset_outputs, set_compound_stats, show_chart, significance_settings,
+    theme, to_csv_bytes, unused_toggle,
 )
 from ui_qc import accuracy_tab, calibration_choices, calibration_tab, drift_tab, provenance_tab, qc_tab
 from ui_external import cca_tab, external_tab, groups_tab, merge_external
@@ -366,13 +367,13 @@ def pipeline_ranges(d, ranges_edit=None):
     return rng
 
 
-def run_pipeline(d, ranges_edit=None, choices=None):
+def run_pipeline(d, ranges_edit=None, choices=None, used=None):
     """LabSolutions の出力から解析用の値と処理履歴を作る (lcms_pipeline.run)。"""
     if ranges_edit is None and merge_mode:
         ranges_edit, choices = calibration_choices(d["name"], d["full"], d["raw"], d["compounds"], editable=False)
     res = lp.run(d["full"], d["raw"], d["compounds"], qset, pipeline_ranges(d, ranges_edit), choices or {},
                  merge=merge_mode, mult_dilution=mult_dilution, mask_level=mask_level, mask_repl=mask_repl,
-                 exclude_status=tuple(exclude_status))
+                 exclude_status=tuple(exclude_status), used=used)
     n_masked = int((res.provenance["マスク"] != "").sum())
     d["mask_info"] = (f"{d['name']}: {mask_level} の値 {n_masked} 個を「{mask_repl}」で処理しています。"
                       if mask_level != qc.MASK_NONE else "")
@@ -427,7 +428,7 @@ def make_base(d, cond_map, control, result=None, used=None, cond_filter=None, me
     サンプルの選択は正規化の前に行う (除外したサンプルが PQN の参照などに影響しないように)。
     (表, 化合物, 正規化係数, 処理パイプラインの結果) を返す。
     """
-    result = result or run_pipeline(d)
+    result = result or run_pipeline(d, used=used)
     base = la.build_base(result.values, d["compounds"], cond_map, False, False)
     keep = pd.Series(True, index=base.index)
     if used is not None:
@@ -471,13 +472,13 @@ def single_mode(d):
                 st.dataframe(cnt.rename("label 数"), height=min(400, 36 * (len(conds) + 1)))
 
     with tab_cal:
-        ranges_edit, choices = calibration_tab(d["name"], d["full"], d["raw"], d["compounds"], dilution_state)
+        ranges_edit, choices = calibration_tab(d["name"], d["full"], d["raw"], d["compounds"], dilution_state, used)
     with tab_acc:
         accuracy_tab(d["full"], pal)
     with tab_lim:
-        limits_tab(d["full"], pal, d["mask_info"])
+        limits_tab(d["full"], pal, d["mask_info"], used)
     with tab_drift:
-        drift_tab(d["full"], is_name, pal, cond_map)
+        drift_tab(d["full"], is_name, pal, cond_map, used)
     with tab_ratio:
         ratios = ratio_definitions(d["compounds"])
         add_ratio = st.checkbox("比を他の解析にも追加 (棒グラフ・ヒートマップ・散布図・検定など)", value=True, key="ratio_add")
@@ -492,10 +493,10 @@ def single_mode(d):
         cond_filter = st.multiselect("condition で絞り込み (空欄 = すべて)", conds, key=f"cond_filter::{d['name']}",
                                      help="個別のサンプルの除外は 条件設定 タブの「使用」列で行います")
     qset.volume_by_label = lp.volume_overrides(meta, const_expr) if vol_on else {}
-    result = run_pipeline(d, ranges_edit, choices)
+    result = run_pipeline(d, ranges_edit, choices, used)
     base, compounds, factors, result = make_base(d, cond_map, control, result, used, cond_filter, meta)
     with tab_prov:
-        provenance_tab(d["name"], result, qset, na_rep, norm_method != ls.NORM_NONE)
+        provenance_tab(d["name"], result, qset, na_rep, norm_method != ls.NORM_NONE, used)
     record_run_info(d, result, used, all_labels, factors, base, compounds)
     with tab_qc:
         qc_tab(d["name"], d["full"], meta, d["compounds"])
@@ -532,7 +533,8 @@ def single_mode(d):
     # ------------------------------------------------ テーブル
     with tab_tbl:
         st.subheader("濃度表 (補正前)")
-        raw_c = la.with_condition(d["raw"], cond_map)
+        show_all_tbl = unused_toggle("tbl", used, all_labels)
+        raw_c = keep_used(la.with_condition(d["raw"], cond_map), used, show_all_tbl)
         st.dataframe(raw_c, hide_index=True, height=320)
         st.download_button("CSV をダウンロード", to_csv_bytes(raw_c, na_rep), f"{d['name']}_conc.csv", "text/csv",
                            key="_dl_raw")
@@ -547,7 +549,7 @@ def single_mode(d):
                 "IS 平均: " + " ・ ".join(f"**{g}** {r['mean']:.3f} (n={int(r['count'])})" for g, r in means.iterrows())
                 + "  \n比率 = IS 濃度 / 希釈グループ内平均、換算濃度 = 濃度 × (1 / 比率)"
             )
-            is_c = la.with_condition(d["is_df"], cond_map)
+            is_c = keep_used(la.with_condition(d["is_df"], cond_map), used, show_all_tbl)
             st.dataframe(is_c, hide_index=True, height=320)
             st.download_button("CSV をダウンロード", to_csv_bytes(is_c, na_rep), f"{d['name']}_conc_IS.csv",
                                "text/csv", key="_dl_is")

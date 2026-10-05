@@ -13,7 +13,8 @@ from lcms_analysis import COND_COL, GROUP_COL, natural_key
 from lcms_plots import PLOT_KINDS, color_map, group_plot, resolve_colormap, resolve_plot_kind, scale
 from make_conc_table import FILE_COL, LABEL_COL
 from ui_common import (
-    alpha, colormap_select, compound_picker, current_editor, register_output, reset_editor, show_chart, stable_editor, star_legend, stars, to_csv_bytes,
+    alpha, colormap_select, compound_picker, current_editor, keep_used, register_output, reset_editor, show_chart,
+    stable_editor, star_legend, stars, to_csv_bytes, unused_toggle,
 )
 
 LIM_COLORS = {qc.LIM_ND: "#e1e0d9", qc.LIM_LOD: "#e34948", qc.LIM_LOQ: "#eda100", qc.LIM_OK: "#2a78d6",
@@ -21,7 +22,9 @@ LIM_COLORS = {qc.LIM_ND: "#e1e0d9", qc.LIM_LOD: "#e34948", qc.LIM_LOQ: "#eda100"
 
 
 # ---------------------------------------------------------------- 定量限界・検出限界
-def limits_tab(full, pal, mask_info):
+def limits_tab(full, pal, mask_info, used=None):
+    show_all = unused_toggle("lim", used, full.loc[~full["is_std"], "label"].unique())
+    full = keep_used(full, used, show_all, std_col="is_std")
     cat = qc.limit_categories(full)
     st.caption("LabSolutions が測定ごとに S/N から算出した 検出限界 (LOD, S/N = 3) と 定量限界 (LOQ, S/N = 10) を使って、"
                "各値を分類します。ノイズが 0 で S/N が ∞ と出力された測定は限界値が 0 になるので「評価不可」とします。"
@@ -305,7 +308,17 @@ def twoway_factor_editor(ds, labels, cond_map):
                          "使用": [True] * len(labels)})
     cur = current_editor(key)
     if cur is not None and "使用" not in cur:  # 以前の版で作った表には「使用」列が無い
-        reset_editor(key, cur.assign(使用=True))
+        cur = cur.assign(使用=True)
+        reset_editor(key, cur)
+    if cur is not None and list(cur[LABEL_COL]) != list(labels):
+        # 解析に使う試料 (条件設定の「使用」) が変わったら、行をそれに合わせる (入力済みの要因は label で引き継ぐ)
+        old = cur.set_index(LABEL_COL)
+        reset_editor(key, pd.DataFrame({
+            LABEL_COL: labels,
+            "要因A": [old["要因A"].get(lb, "") for lb in labels],
+            "要因B": [old["要因B"].get(lb, "") for lb in labels],
+            "使用": [bool(old["使用"].get(lb, True)) for lb in labels],
+        }))
     if split:
         reset_editor(key, from_condition())
         st.rerun()
@@ -317,6 +330,8 @@ def twoway_factor_editor(ds, labels, cond_map):
                                               "使用", help="チェックを外したサンプルは二元配置 ANOVA に使いません")})
     factors = {}
     for _, r in edited.iterrows():
+        if r[LABEL_COL] not in labels:
+            continue
         a, b = str(r.get("要因A") or "").strip(), str(r.get("要因B") or "").strip()
         use = r.get("使用", True)
         if a and b and (use is None or pd.isna(use) or bool(use)):

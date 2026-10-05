@@ -251,3 +251,18 @@ def test_converted_concentration_flags_unconverted_dilution(data):
     rx = val(res, "20260101_S-1 x10_1_011.lcd", "AA2")
     assert rx["希釈係数"] == 1.0 and "換算濃度ではない" in rx["最終値の意味"]
     assert any("換算濃度になっていません" in n for n in res.notes)
+
+
+# ---------------------------------------------------------------- 「使用」を外した試料
+def test_unused_samples_excluded_from_is_mean_and_auto_choice(data):
+    full, raw, cpds, rng = data
+    s = lp.QuantSettings(quant_method=lp.QM_EXTERNAL, app_is=True, is_name="IS", dilution_state=lp.DIL_NOT_APPLIED)
+    used = {"S-1", "S-3", "S-4"}  # S-2 (IS が 20 と外れ値) を外す
+    res = lp.run(full, raw, cpds, s, rng, used=used)
+    r = val(res, "20260101_S-1_1_010.lcd", "AA2")
+    assert r["IS 係数"] == pytest.approx(10.0 / 10.0)  # S-2 を除いた IS 平均 (10, 10, 10) / 10
+    assert not res.provenance.loc[res.provenance["label"] == "S-2", "解析に使用"].any()
+    # 自動 (化合物単位) の希釈の選択も、使う試料だけで判断する: S-1 を外すと上限超過が無くなり希釈なしを使う
+    m_all = lp.run(full, raw, cpds, s, rng, merge=True)
+    m_sub = lp.run(full, raw, cpds, s, rng, merge=True, used={"S-3", "S-4"})
+    assert val(m_all, "S-3", "AA1")["希釈"] == "x10" and val(m_sub, "S-3", "AA1")["希釈"] == "希釈なし"

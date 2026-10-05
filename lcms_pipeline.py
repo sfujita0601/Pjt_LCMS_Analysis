@@ -150,12 +150,15 @@ def diagnose_quant_method(full, is_name):
     return dict(n_compounds=int(len(g)), cv_external=ce, cv_internal=ci, hint=hint)
 
 
-def is_factors(raw, is_name):
+def is_factors(raw, is_name, used=None):
     """アプリでの IS 補正係数 (ファイルごと)。係数 = 希釈グループ内の IS 平均 / そのファイルの IS。
 
-    STD は除いて平均を取る。IS が未検出のファイルは NaN (補正できないので、その値は欠損になる)。
+    STD と、解析に使わない試料 (used に含まれない label) は除いて平均を取る。
+    IS が未検出のファイルは NaN (補正できないので、その値は欠損になる)。
     """
     samples = raw[~raw[LABEL_COL].map(is_std)]
+    if used is not None:
+        samples = samples[samples[LABEL_COL].isin(used)]
     means = samples.groupby(DILUTION_COL)[is_name].mean()
     f = raw[DILUTION_COL].map(means) / raw[is_name]
     return pd.Series(f.values, index=raw[FILE_COL].values, name="IS 係数")
@@ -218,8 +221,11 @@ class PipelineResult:
 
 
 def run(full, raw, compounds, settings, ranges, choices=None, merge=False, mult_dilution=False,
-        mask_level=qc.MASK_NONE, mask_repl=qc.REPL_NAN, exclude_status=(ST_ERR,)):
+        mask_level=qc.MASK_NONE, mask_repl=qc.REPL_NAN, exclude_status=(ST_ERR,), used=None):
     """LabSolutions の出力から解析用の値を作り、処理履歴を返す。
+
+    used: 解析に使う label の集合 (None = すべて)。使わない試料は IS 平均や希釈の自動選択の計算に含めず、
+    処理履歴の「解析に使用」を False にする (行は残す。解析の表からは make_base で除く)。
 
     merge=False: ファイル (測定) ごとに 1 行 (希釈グループ別に解析する場合)
     merge=True : label ごとに 1 行 (検量範囲に基づいて 希釈なし / 希釈測定 を採用。採用できなければ 再測定候補)
@@ -237,7 +243,7 @@ def run(full, raw, compounds, settings, ranges, choices=None, merge=False, mult_
 
     # IS 係数
     if settings.is_applied():
-        isf = is_factors(raw, settings.is_name)
+        isf = is_factors(raw, settings.is_name, used)
         notes.append(f"IS 補正: 係数 = 希釈グループ内の {settings.is_name} 平均 / 各ファイルの {settings.is_name}")
     else:
         isf = pd.Series(1.0, index=raw[FILE_COL].values)
@@ -318,6 +324,8 @@ def run(full, raw, compounds, settings, ranges, choices=None, merge=False, mult_
         values = values[[FILE_COL, LABEL_COL, DILUTION_COL] + list(compounds)]
     else:
         first = files.drop_duplicates([LABEL_COL, DILUTION_COL], keep="first").set_index([LABEL_COL, DILUTION_COL])
+        # 希釈の自動選択 (化合物単位) は、解析に使う試料だけで判断する
+        first_used = first if used is None else first[first.index.get_level_values(0).isin(used)]
         labels = list(dict.fromkeys(files.sort_values(LABEL_COL)[LABEL_COL]))
         dil_name = next((d for d in files[DILUTION_COL].unique() if d), None)
         rows = []
@@ -328,7 +336,7 @@ def run(full, raw, compounds, settings, ranges, choices=None, merge=False, mult_
             for c in compounds:
                 cu = value_of(fu, c) if fu else (np.nan, ST_NONE, "希釈なしの測定なし")
                 cd = value_of(fd, c) if fd else (np.nan, ST_NONE, "希釈測定なし")
-                pref = _preferred(c, choices, ranges, cu, cd, files, first, value_of, dil_name)
+                pref = _preferred(c, choices, ranges, cu, cd, files, first_used, value_of, dil_name)
                 cand = [(fu, "", cu), (fd, dil_name, cd)]
                 if pref == "d":
                     cand = cand[::-1]
@@ -375,6 +383,7 @@ def run(full, raw, compounds, settings, ranges, choices=None, merge=False, mult_
         values = pd.DataFrame(rows, columns=[FILE_COL, LABEL_COL, DILUTION_COL] + list(compounds))
 
     prov = pd.DataFrame(prov_rows)
+    prov.insert(1, "解析に使用", True if used is None else prov[LABEL_COL].isin(used))
     values, prov = _apply_mask(values, prov, full, compounds, mask_level, mask_repl, merge)
     keyed = prov[prov["行"] != "(不採用)"]
     status = keyed.pivot_table(index="行", columns="化合物", values="状態", aggfunc="first")

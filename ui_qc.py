@@ -12,7 +12,7 @@ import lcms_stats as ls
 from lcms_analysis import COND_COL, natural_key
 from lcms_plots import color_map, scale
 from make_conc_table import DILUTION_COL, LABEL_COL, is_std
-from ui_common import alpha, current_editor, register_output, reset_editor, show_chart, stable_editor, to_csv_bytes
+from ui_common import alpha, current_editor, keep_used, register_output, reset_editor, show_chart, stable_editor, to_csv_bytes, unused_toggle
 
 CHOICES = [qc.CHOICE_AUTO, qc.CHOICE_AUTO_SAMPLE, qc.SRC_NONE, qc.SRC_DIL]
 
@@ -70,7 +70,7 @@ def merged_table(values, raw, compounds, ranges, choices):
                               dilution_factor(values))
 
 
-def calibration_tab(ds, full, raw, compounds, dilution_state):
+def calibration_tab(ds, full, raw, compounds, dilution_state, used=None):
     """検量範囲と希釈の採用ルールを設定する。(範囲の表, {化合物: 選択}) を返す。結果は 処理履歴・状態 タブに表示。"""
     st.caption("検量線の範囲 (検量点に使われた STD の設定濃度の最小〜最大) と、希釈なし / 希釈測定の採用を化合物ごとに決めます。"
                "サイドバーの「希釈の扱い」で「検量線範囲で統合」を選ぶと使われます。採用した測定・採用しなかった測定・理由は "
@@ -78,16 +78,24 @@ def calibration_tab(ds, full, raw, compounds, dilution_state):
     st.markdown("**採用のルール** (統合する場合): 優先する測定が検量範囲内 (または範囲未評価) ならそれを採用し、"
                 "上限を超えていればもう一方の測定を確認します。どちらも採用できなければ値は採用せず **再測定候補** にします "
                 "(元の値は処理履歴に残ります)。両方が範囲内なら 希釈測定 x 倍率 / 希釈なし の一致も確認します。")
+    show_all = unused_toggle(f"cal::{ds}", used, raw.loc[~raw[LABEL_COL].map(is_std), LABEL_COL].unique())
+    raw = keep_used(raw, used, show_all)
     ranges, choices = calibration_choices(ds, full, raw, compounds)
     dilution_linearity_section(raw, compounds, dilution_factor(raw), dilution_state)
     return ranges, choices
 
 
-def provenance_tab(ds, result, qset, na_rep, normalized):
+def provenance_tab(ds, result, qset, na_rep, normalized, used=None):
     """値ごとの処理履歴と状態。"""
     from lcms_pipeline import STATUS_ORDER
 
     prov, status, values = result.provenance, result.status, result.values
+    show_all = unused_toggle(f"prov::{ds}", used, values[LABEL_COL].unique())
+    if not show_all:
+        prov = prov[prov["解析に使用"]]
+        values = values[values[LABEL_COL].isin(used)]
+        keep_rows = set(prov["行"])
+        status = status[status.index.isin(keep_rows)]
     st.markdown(f"**最終値の意味**: {qset.meaning(normalized=False)}"
                 + (" ・ 解析の各タブでは、さらにサンプル間の正規化をした相対値を使っています" if normalized else ""))
     s = qset
@@ -253,7 +261,9 @@ def accuracy_tab(full, pal):
 
 
 # ---------------------------------------------------------------- ドリフト
-def drift_tab(full, is_name, pal, cond_map):
+def drift_tab(full, is_name, pal, cond_map, used=None):
+    show_all = unused_toggle("drift", used, full.loc[~full["is_std"], LABEL_COL].unique())
+    full = keep_used(full, used, show_all, std_col="is_std")
     inj = qc.injection_order(full)
     st.info("このタブは測定順のトレンドの表示だけで、ドリフト補正は行いません。一般試料のトレンドから補正すると "
             "群差まで消すおそれがあるためです。QC に基づく補正には、測定順に沿って配置したプール QC が必要です。")
