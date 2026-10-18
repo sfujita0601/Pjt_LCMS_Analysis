@@ -17,7 +17,7 @@ import lcms_stats as ls
 from lcms_analysis import COND_COL, GROUP_COL, LOG_CHOICES, apply_log, natural_key
 from lcms_plots import color_map, resolve_colormap, scale
 from make_conc_table import LABEL_COL
-from lcms_plots import group_plot
+from lcms_plots import forest_plot, group_plot
 from ui_common import alpha, colormap_select, compound_picker, register_output, reset_editor, show_chart, stable_editor, star_legend, symmetric_limit, to_csv_bytes
 
 UP, DOWN, NS = "増加", "減少", "有意差なし"
@@ -80,10 +80,18 @@ def volcano_tab(base, groups, conds, control, compounds, pal):
     show_chart(st, fig, width="stretch")
     st.caption(f"FC = {treat} の平均 / {control} の平均。点線 = 閾値 (|log2FC| ≥ {fc_thr}, 補正後 p ≤ {q_thr})。"
                " どちらかの群で検出が 2 未満の化合物は検定せず除外しています。")
+    if test.startswith("moderated") and res.attrs.get("prior"):
+        pr = res.attrs["prior"]
+        st.caption(f"moderated t: 全化合物の分散から推定した事前分布 d0 = {pr['d0']:.2f}, s0² = {pr['s0²']:.4g} (log2 値)。"
+                   "各化合物の分散を この事前分布に向けて縮小し、自由度 d + d0 の t 分布で検定しています (Smyth, 2004)。"
+                   "小標本で分散の推定が不安定になるのを抑え、検出力を上げる方法です。")
     out = res.drop(columns=["-log10"]).sort_values("p")
     register_output(f"統計/2 群比較 {treat} vs {control} ({group})", out)
     st.dataframe(out.round(5), hide_index=True, height=320)
     st.download_button("検定結果 (CSV)", to_csv_bytes(out), f"volcano_{treat}_vs_{control}.csv", "text/csv", key="_dl_vol")
+
+    forest_section(sub, compounds, conds, control, treat, test, corr, log_test, q_thr, fc_thr, pal, group,
+                   "個体ID" if design.startswith("対応") else None)
 
     st.subheader("化合物ごとの比較")
     from ui_extra import add_brackets, plot_controls, plot_values  # 循環 import を避けるためここで読み込む
@@ -103,6 +111,53 @@ def volcano_tab(base, groups, conds, control, compounds, pal):
         show_chart(c1, fig, width="stretch")
         c2.caption(f"{kind}。{star_legend()} ({corr})。")
     return dict(group=group, treat=treat, control=control, res=res, q_thr=q_thr, test=test, corr=corr)
+
+
+def forest_section(sub, compounds, conds, control, treat, test, corr, log_test, q_thr, fc_thr, pal, group, paired_by):
+    """効果量 (log2 幾何平均比) と 95% 信頼区間のフォレストプロット。"""
+    st.subheader("効果量のフォレストプロット")
+    others = [c for c in conds if c != control]
+    c1, c2, c3, c4 = st.columns(4)
+    which = c1.radio("比較", [f"{treat} vs {control} のみ", "全ての群 vs 対照群"], key="fp_which")
+    order = c2.selectbox("並べ方", ["効果の大きい順 (|log2 比|)", "補正後 p の小さい順", "効果の値の順 (正 → 負)", "名前順"],
+                         key="fp_order")
+    top = c3.number_input("表示する化合物の数", 5, 200, 30, 5, key="fp_top")
+    only_sig = c4.checkbox("補正後 p ≤ 閾値 の化合物だけ", value=False, key="fp_sig")
+    comps = [treat] if which.endswith("のみ") else others
+    res = pd.concat([ls.compare_groups(sub, compounds, t, control, test, corr, log_test, paired_by=paired_by)
+                     for t in comps], ignore_index=True)
+    res = res[res["log2 幾何平均比"].notna()]
+    if res.empty:
+        st.info("効果量を計算できる化合物がありません")
+        return
+    key = res.groupby("化合物").agg(eff=("log2 幾何平均比", lambda v: v.abs().max()), q=("q", "min"),
+                                     val=("log2 幾何平均比", "max"))
+    if only_sig:
+        key = key[key["q"] <= q_thr]
+    if order.startswith("効果の大きい"):
+        key = key.sort_values("eff", ascending=False)
+    elif order.startswith("補正後"):
+        key = key.sort_values("q")
+    elif order.startswith("効果の値"):
+        key = key.sort_values("val", ascending=False)
+    else:
+        key = key.loc[sorted(key.index, key=natural_key)]
+    keep = list(key.index[: int(top)])
+    if not keep:
+        st.info("条件に合う化合物がありません")
+        return
+    view = res[res["化合物"].isin(keep)].copy()
+    view["化合物"] = pd.Categorical(view["化合物"], keep, ordered=True)
+    view = view.sort_values("化合物")
+    view["化合物"] = view["化合物"].astype(str)
+    labels = [f"{t} vs {control}" for t in comps]
+    view["比較"] = view["比較"].astype(str)
+    fig = forest_plot(view, labels, pal, q_thr, fc_thr, f"{group} ・ {test} ・ {corr}")
+    show_chart(st, fig)
+    st.caption("点 = log2 幾何平均比 (log2 値の平均の差)、横線 = 95% 信頼区間"
+               + (" (moderated な標準誤差と自由度)" if test.startswith("moderated") else " (Welch)")
+               + f"。塗りつぶし = 補正後 p ≤ {q_thr:g}、白抜き = それ以外。0 の線をまたぐ区間は、向きが定まっていないことを示します。")
+    register_output(f"統計/フォレストプロット ({group})", view)
 
 
 # ---------------------------------------------------------------- 散布図

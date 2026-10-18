@@ -297,3 +297,42 @@ def group_plot(df, value, group_col, groups, label_col, pal, kind, show_points=T
                      zeroline=False)
     fig.update_yaxes(type="log" if logy else "linear")
     return fig
+
+
+# ---------------------------------------------------------------- フォレストプロット (効果量と信頼区間)
+def forest_plot(res, comparisons, pal, q_thr=0.05, fc_thr=None, title=""):
+    """化合物ごとの log2 幾何平均比と 95% 信頼区間。res は比較 (比較 列) ごとに縦に連結した検定結果。
+
+    複数の比較は色を分け、同じ化合物の行の中で上下に少しずらして並べる。補正後 p ≤ q_thr の点は塗り、
+    それ以外は白抜きにする。
+    """
+    cpds = list(dict.fromkeys(res["化合物"]))[::-1]  # 上から順に並ぶよう逆順
+    ypos = {c: i for i, c in enumerate(cpds)}
+    cmap = color_map(comparisons, pal)
+    k = len(comparisons)
+    fig = go.Figure()
+    for j, comp in enumerate(comparisons):
+        d = res[res["比較"] == comp].dropna(subset=["log2 幾何平均比"])
+        off = (j - (k - 1) / 2) * (0.6 / max(1, k))
+        y = [ypos[c] + off for c in d["化合物"]]
+        sig = (d["q"] <= q_thr).values
+        lo = d["log2 幾何平均比"] - d["95% CI 下限"]
+        hi = d["95% CI 上限"] - d["log2 幾何平均比"]
+        fig.add_trace(go.Scatter(
+            x=d["log2 幾何平均比"], y=y, mode="markers", name=comp,
+            error_x=dict(type="data", symmetric=False, array=hi, arrayminus=lo, color=cmap[comp], thickness=1.5, width=0),
+            marker=dict(size=9, color=[cmap[comp] if s_ else "white" for s_ in sig],
+                        line=dict(width=1.8, color=cmap[comp]), symbol="circle"),
+            customdata=np.stack([d["化合物"], d["95% CI 下限"], d["95% CI 上限"], d["p"], d["q"]], axis=-1),
+            hovertemplate="%{customdata[0]}<br>log2 比 %{x:.3f} [%{customdata[1]:.3f}, %{customdata[2]:.3f}]"
+                          "<br>p %{customdata[3]:.3g} ・ 補正後 p %{customdata[4]:.3g}<extra>" + comp + "</extra>",
+        ))
+    fig.add_vline(x=0, line=dict(color="#898781", width=1))
+    if fc_thr:
+        for xv in (-fc_thr, fc_thr):
+            fig.add_vline(x=xv, line=dict(color="#c3c2b7", width=1, dash="dot"))
+    fig.update_yaxes(tickvals=list(range(len(cpds))), ticktext=cpds, range=[-0.7, len(cpds) - 0.3], tickfont_size=10)
+    fig.update_xaxes(title="log2 (比較群 / 対照群) の幾何平均比と 95% 信頼区間", zeroline=False)
+    fig.update_layout(height=max(360, 22 * len(cpds) + 160), title=title, legend_title_text="比較",
+                      margin=dict(l=200, t=60))
+    return fig

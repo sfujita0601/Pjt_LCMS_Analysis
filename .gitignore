@@ -11,3 +11,5 @@ data/*
 !data/.gitkeep
 
 temp_analysis/*
+# README が誤って上書きされたときの退避ファイル (コミットしない)
+README_rnaseq_prompt_backup.md

@@ -94,7 +94,8 @@ def scale_columns(X, method):
 
 
 # ---------------------------------------------------------------- 群間比較 (ボルケーノ)
-TESTS = ["Welch の t 検定", "Student の t 検定", "Mann-Whitney U 検定", "Brunner-Munzel 検定"]
+TESTS = ["moderated t 検定 (経験ベイズ, limma 型)", "Welch の t 検定", "Student の t 検定", "Mann-Whitney U 検定",
+         "Brunner-Munzel 検定"]
 CORRECTIONS = {
     "Benjamini-Hochberg (FDR)": "fdr_bh",
     "Benjamini-Yekutieli (FDR)": "fdr_by",
@@ -181,7 +182,7 @@ def compare_groups(df, compounds, treat, control, test, correction, log_for_test
                     if paired_by:
                         p = float(stats.ttest_rel(ta, tb).pvalue if test.startswith("対応のある t")
                                   else stats.wilcoxon(ta, tb).pvalue)
-                    else:
+                    elif not test.startswith("moderated"):  # moderated t は全化合物をまとめて後で計算する
                         p = float(_test(ta, tb, test))
         diff, lo, hi, g = _effect(a, b)
         rows.append({"化合物": c, "比較": f"{treat} vs {control}", "検定": test + (f" (対応: {paired_by})" if paired_by else ""),
@@ -190,6 +191,21 @@ def compare_groups(df, compounds, treat, control, test, correction, log_for_test
                      "log2FC": float(log2_safe([fc])[0]) if pd.notna(fc) else np.nan,
                      "log2 幾何平均比": diff, "95% CI 下限": lo, "95% CI 上限": hi, "Hedges g (log2)": g, "p": p})
     res = pd.DataFrame(rows)
+    if test.startswith("moderated") and not paired_by and len(res):
+        # 全化合物の分散を使って縮小推定する (常に log2 値で行う)。信頼区間も moderated な標準誤差と自由度で求める
+        la_ = [pd.Series(log2_safe(A[c].dropna().astype(float))).dropna().values for c in compounds]
+        lb_ = [pd.Series(log2_safe(B[c].dropna().astype(float))).dropna().values for c in compounds]
+        mt = moderated_t(la_, lb_)
+        dfv = np.asarray(mt["df"], float)
+        tq = np.where(np.isfinite(dfv), stats.t.ppf(0.975, np.where(np.isfinite(dfv), dfv, 1.0)), stats.norm.ppf(0.975))
+        enough = np.array([len(a) >= min_n and len(b) >= min_n for a, b in zip(la_, lb_)])
+        res["p"] = np.where(enough, mt["p"], np.nan)
+        res["log2 幾何平均比"] = mt["diff"]
+        res["95% CI 下限"] = mt["diff"] - tq * mt["se"]
+        res["95% CI 上限"] = mt["diff"] + tq * mt["se"]
+        res["moderated t"] = mt["t"]
+        res["自由度 (d + d0)"] = dfv
+        res.attrs["prior"] = {"d0": mt["d0"], "s0²": mt["s02"]}
     res["q"] = adjust_p(res["p"], CORRECTIONS[correction])
     return res
 
@@ -718,3 +734,84 @@ def pairwise_correlation_table(X, Y, method="spearman", correction="fdr_bh"):
     out = pd.DataFrame(rows)
     out["補正後 p"] = adjust_p(out["p"], correction).values
     return out
+
+
+# ---------------------------------------------------------------- moderated t 検定 (経験ベイズ, limma 型)
+MODT = "moderated t 検定 (経験ベイズ, limma 型)"
+
+
+def _trigamma_inverse(y):
+    """trigamma(x) = y を満たす x (Smyth 2004 / limma の trigammaInverse と同じ Newton 法)。"""
+    from scipy.special import polygamma
+
+    if y > 1e7:
+        return 1 / np.sqrt(y)
+    if y < 1e-6:
+        return 1 / y
+    x = 0.5 + 1 / y
+    for _ in range(50):
+        tri = polygamma(1, x)
+        dif = tri * (1 - tri / y) / polygamma(2, x)
+        x += dif
+        if -dif / x < 1e-8:
+            break
+    return x
+
+
+def fit_f_dist(s2, df):
+    """標本分散 s2 (自由度 df) から、分散の事前分布 (尺度付き逆カイ二乗) の d0 と s0² を推定する。
+
+    Smyth GK (2004) の積率法 (limma の fitFDist と同じ考え方)。log(s²) の平均と分散から、
+    d0 (事前の自由度) と s0² (事前の分散) を求める。ばらつきが χ² から期待される以下なら d0 = ∞。
+    """
+    from scipy.special import digamma, polygamma
+
+    s2, df = np.asarray(s2, float), np.asarray(df, float)
+    ok = np.isfinite(s2) & (s2 > 0) & (df > 0)
+    s2, df = s2[ok], df[ok]
+    if len(s2) < 3:
+        return np.inf, float(np.nanmean(s2)) if len(s2) else np.nan
+    z = np.log(s2)
+    e = z - digamma(df / 2) + np.log(df / 2)
+    emean = e.mean()
+    evar = ((e - emean) ** 2).sum() / (len(e) - 1) - polygamma(1, df / 2).mean()
+    if evar > 0:
+        d0 = 2 * _trigamma_inverse(evar)
+        s02 = float(np.exp(emean + digamma(d0 / 2) - np.log(d0 / 2)))
+    else:
+        d0, s02 = np.inf, float(np.exp(emean))
+    return float(d0), s02
+
+
+def moderated_t(groups_a, groups_b):
+    """化合物ごとの 2 群比較を、分散を化合物間で縮小推定して行う (Smyth 2004)。
+
+    groups_a / groups_b: 化合物ごとの値 (log2 変換済みを想定) のリスト。
+    s̃² = (d0 s0² + d s²) / (d0 + d)、t̃ = (平均の差) / (s̃ √(1/n1 + 1/n2))、自由度 d + d0。
+    戻り値: dict(diff, se, t, df, p, d0, s02) (配列は化合物の順)
+    """
+    n = len(groups_a)
+    diff, s2, d, f = np.full(n, np.nan), np.full(n, np.nan), np.full(n, np.nan), np.full(n, np.nan)
+    for i, (a, b) in enumerate(zip(groups_a, groups_b)):
+        a, b = np.asarray(a, float), np.asarray(b, float)
+        a, b = a[np.isfinite(a)], b[np.isfinite(b)]
+        if len(a) < 1 or len(b) < 1 or len(a) + len(b) < 3:
+            continue
+        diff[i] = a.mean() - b.mean()
+        d[i] = len(a) + len(b) - 2
+        ss = ((a - a.mean()) ** 2).sum() + ((b - b.mean()) ** 2).sum()
+        s2[i] = ss / d[i] if d[i] > 0 else np.nan
+        f[i] = 1 / len(a) + 1 / len(b)
+    d0, s02 = fit_f_dist(s2, d)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        if np.isinf(d0):
+            post = np.full(n, s02)
+            dft = np.full(n, np.inf)
+        else:
+            post = (d0 * s02 + d * np.nan_to_num(s2)) / (d0 + d)
+            dft = d + d0
+        se = np.sqrt(post * f)
+        t = diff / se
+        p = 2 * stats.t.sf(np.abs(t), dft) if not np.isinf(d0) else 2 * stats.norm.sf(np.abs(t))
+    p = np.where(np.isfinite(diff), p, np.nan)
+    return dict(diff=diff, se=se, t=t, df=dft, p=p, d0=d0, s02=s02)
