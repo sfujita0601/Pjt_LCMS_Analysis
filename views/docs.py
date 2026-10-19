@@ -267,6 +267,22 @@ Welch の信頼区間、moderated t では縮小した分散による信頼区�
 アミノ酸をまたいだ相関 (Spearman・Pearson) と回帰の傾きも出しますが、アミノ酸は代謝経路でつながっていて独立な観測ではないため、
 探索の目安として扱ってください。分類の「飼料が変化した」の閾値 (|log2 比|) は任意に設定できます。
 
+### レーダーチャート (レーダーチャート タブ)
+
+選んだ代謝物を軸にして、基準の condition に対する各群の評価値を描きます。評価値は Fold change・log2 Fold change・
+変化率 %・差分・Welch の t 値・Hedges の g・Z スコア (基準群の SD で標準化)・値そのもの から、中心値は平均 / 中央値から選びます
+(「log2 変換した値で計算」で幾何平均・幾何平均の比になります)。
+
+ばらつき (SD・SEM・95% 信頼区間) は、比の場合は誤差の伝搬則 (デルタ法) で求めます。2 群が独立なら
+FC = A/B の SD ≈ FC·√((s_A/A)² + (s_B/B)²)、差分の SD = √(s_A² + s_B²)、SEM は各群の s/√n で同じ計算をします。
+log2 値で計算すると、ばらつきは log2 の上で対称、FC の上では非対称 (2^(d ± s)) になります。中央値を選んだ場合は
+頑健な SD (IQR/1.349) と中央値の漸近標準誤差 (1.2533·SD/√n) を使います。分布を仮定しない「ブートストラップ 95% 区間」
+(群の中で復元抽出) も選べますが、n が 5 未満では区間が狭く出やすいので参考程度にしてください。
+「基準群自身のばらつきも描く」では、基準群を基準線上に描き、基準群の中のばらつき (基準側の誤差だけ) を示します。
+
+レーダーチャートは軸の並べ方で多角形の形と面積の印象が変わるため、面積を群間の比較の根拠にしないでください。誤差の伝搬則については [38] を参照。
+桁の違う濃度を「値そのもの」で描く場合は、化合物ごとに最大値を 1 にするか Z スコア化してください。
+
 ### 検定と一緒に載せる図
 
 慣習的には、平均を比べる検定 (t 検定・ANOVA) には 平均 ± SD (または SEM) の棒グラフ、
@@ -433,4 +449,5 @@ st.markdown("""
 35. Winkler AM, Renaud O, Smith SM, Nichols TE. Permutation inference for canonical correlation analysis. *NeuroImage*. 2020;220:117065. doi:10.1016/j.neuroimage.2020.117065
 36. Langsrud Ø. ANOVA for unbalanced data: use Type II instead of Type III sums of squares. *Stat Comput*. 2003;13(2):163–167.
 37. Smyth GK. Linear models and empirical Bayes methods for assessing differential expression in microarray experiments. *Stat Appl Genet Mol Biol*. 2004;3:Article3. doi:10.2202/1544-6115.1027
+38. Ku HH. Notes on the use of propagation of error formulas. *J Res Natl Bur Stand C*. 1966;70C(4):263–273. doi:10.6028/jres.070C.025
 """)

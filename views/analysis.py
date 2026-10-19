@@ -24,6 +24,7 @@ from ui_common import (
 )
 from ui_qc import accuracy_tab, calibration_choices, calibration_tab, drift_tab, provenance_tab, qc_tab
 from ui_diet import diet_tab
+from ui_radar import radar_tab
 from ui_external import cca_tab, external_tab, groups_tab, merge_external
 from ui_extra import limits_tab, twoway_tab, multigroup_tab, ratio_definitions, ratio_view
 from ui_project import check_data, loader, saver
@@ -452,10 +453,10 @@ def make_base(d, cond_map, control, result=None, used=None, cond_filter=None, me
 # ================================================================ 単一データセット
 def single_mode(d):
     tabs = st.tabs(["条件設定", "検量線・希釈", "処理履歴・状態", "STD 正確さ", "LOD・LOQ", "QC", "ドリフト", "テーブル",
-                    "代謝物比", "外部データ", "変数グループ", "棒グラフ", "ヒートマップ", "散布図", "クラスタリング", "PCA",
+                    "代謝物比", "外部データ", "変数グループ", "棒グラフ", "レーダーチャート", "ヒートマップ", "散布図", "クラスタリング", "PCA",
                     "UMAP", "ボルケーノ", "飼料組成", "多群比較", "二元配置 ANOVA", "相関", "正準相関", "KEGG"])
     (tab_cond, tab_cal, tab_prov, tab_acc, tab_lim, tab_qc, tab_drift, tab_tbl, tab_ratio, tab_ext, tab_grp, tab_bar,
-     tab_hm, tab_sc, tab_cl, tab_pca, tab_umap, tab_vol, tab_diet, tab_mg, tab_tw, tab_cor, tab_cca, tab_kegg) = tabs
+     tab_radar, tab_hm, tab_sc, tab_cl, tab_pca, tab_umap, tab_vol, tab_diet, tab_mg, tab_tw, tab_cor, tab_cca, tab_kegg) = tabs
     all_labels = sorted(d["raw"][LABEL_COL].unique(), key=la.natural_key)
 
     with tab_cond:
@@ -754,6 +755,8 @@ def single_mode(d):
         ratio_view(base, ratios, groups, conds, pal, na_rep)
     with tab_vol:
         vres = volcano_tab(base, groups, conds, control if has_control else None, compounds, pal)
+    with tab_radar:
+        radar_tab(base, groups, conds, control if has_control else None, compounds, pal)
     with tab_diet:
         diet_tab(base, groups, conds, control if has_control else None, compounds, pal, DATA_DIR)
     with tab_mg:

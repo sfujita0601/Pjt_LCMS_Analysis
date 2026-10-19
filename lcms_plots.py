@@ -336,3 +336,83 @@ def forest_plot(res, comparisons, pal, q_thr=0.05, fc_thr=None, title=""):
     fig.update_layout(height=max(360, 22 * len(cpds) + 160), title=title, legend_title_text="比較",
                       margin=dict(l=200, t=60))
     return fig
+
+
+def _rgba(color, alpha):
+    c = str(color).lstrip("#")
+    if len(c) == 6:
+        return f"rgba({int(c[0:2], 16)},{int(c[2:4], 16)},{int(c[4:6], 16)},{alpha})"
+    return color
+
+
+def radar_plot(table, conds, compounds, pal, base=None, ref_name="", disp_style="誤差線", facet=False, ncols=3,
+               r_range=None, star_text=None, title="", value_title=""):
+    """レーダーチャート。table: lcms_radar.radar_table の結果 (condition, 化合物, 値, 下限, 上限)。
+
+    disp_style: 誤差線 (各軸に下限〜上限の線) / 帯 (下限〜上限を塗る) / なし。
+    base: 基準群と同じ値の位置 (破線の円)。star_text: {(condition, 化合物): "*"}。
+    facet=True で condition ごとに別の図に並べる (半径の範囲は共通)。
+    """
+    from lcms_analysis import COND_COL
+
+    cmap = color_map(conds, pal)
+    theta = list(compounds) + [compounds[0]]
+    n = len(conds)
+    if facet:
+        cols = max(1, min(ncols, n))
+        rows = int(np.ceil(n / cols))
+        fig = make_subplots(rows=rows, cols=cols, specs=[[{"type": "polar"}] * cols for _ in range(rows)],
+                            subplot_titles=[str(c) for c in conds], horizontal_spacing=0.08,
+                            vertical_spacing=0.12 / max(rows - 1, 1) if rows > 1 else 0.1)
+        pos = {c: dict(row=i // cols + 1, col=i % cols + 1) for i, c in enumerate(conds)}
+    else:
+        fig = go.Figure()
+        pos = {c: {} for c in conds}
+    shown_base = set()
+    for cond in conds:
+        g = table[table[COND_COL] == cond].set_index("化合物").reindex(compounds)
+        est = g["値"].values.astype(float)
+        lo, hi = g["下限"].values.astype(float), g["上限"].values.astype(float)
+        color = cmap[cond]
+        kw = pos[cond]
+        if base is not None and (facet or not shown_base):
+            fig.add_trace(go.Scatterpolar(r=[base] * len(theta), theta=theta, mode="lines", name=f"基準 ({ref_name})",
+                                          line=dict(color="#898781", dash="dash", width=1.2), hoverinfo="skip",
+                                          showlegend=not shown_base, legendgroup="_base"), **kw)
+            shown_base.add(cond)
+        ok = np.isfinite(lo) & np.isfinite(hi)
+        if disp_style == "帯" and ok.any():
+            lo_f, hi_f = np.where(ok, lo, est), np.where(ok, hi, est)
+            # 外周 (上限) を一周したあと、内周 (下限) を逆回りに一周して穴をあける
+            back = [0] + list(range(len(compounds) - 1, 0, -1)) + [0]
+            r = list(hi_f) + [hi_f[0]] + [lo_f[i] for i in back]
+            th = theta + [compounds[i] for i in back]
+            fig.add_trace(go.Scatterpolar(r=r, theta=th, mode="lines", fill="toself", fillcolor=_rgba(color, 0.18),
+                                          line=dict(width=0), hoverinfo="skip", showlegend=False,
+                                          legendgroup=str(cond)), **kw)
+        elif disp_style == "誤差線" and ok.any():
+            r, th = [], []
+            for c, l_, h_ in zip(compounds, lo, hi):
+                if np.isfinite(l_) and np.isfinite(h_):
+                    r += [l_, h_, None]
+                    th += [c, c, None]
+            fig.add_trace(go.Scatterpolar(r=r, theta=th, mode="lines", line=dict(color=color, width=2.5),
+                                          opacity=0.55, hoverinfo="skip", showlegend=False, connectgaps=False,
+                                          legendgroup=str(cond)), **kw)
+        custom = np.stack([lo, hi], axis=-1)
+        text = [star_text.get((cond, c), "") if star_text else "" for c in compounds]
+        fig.add_trace(go.Scatterpolar(
+            r=list(est) + [est[0]], theta=theta, mode="lines+markers+text" if star_text else "lines+markers",
+            name=str(cond), legendgroup=str(cond), line=dict(color=color, width=2), marker=dict(size=7, color=color),
+            text=text + [""], textposition="top center", textfont=dict(size=14, color=color),
+            customdata=np.vstack([custom, custom[:1]]),
+            hovertemplate="%{theta}<br>" + str(cond) + ": %{r:.4g}<br>範囲 %{customdata[0]:.4g} – %{customdata[1]:.4g}"
+                          "<extra></extra>"), **kw)
+    polar = dict(radialaxis=dict(title=None, gridcolor="#d9d8d0", linecolor="#898781", angle=90 - 180 / len(compounds)),
+                 angularaxis=dict(direction="clockwise", rotation=90, gridcolor="#e6e5de"))
+    if r_range is not None:
+        polar["radialaxis"]["range"] = list(r_range)
+    fig.update_polars(**polar)
+    h = 620 if not facet else 380 * int(np.ceil(n / max(1, min(ncols, n)))) + 80
+    fig.update_layout(height=h, title=title, legend_title_text=value_title, margin=dict(l=70, r=70, t=80, b=50))
+    return fig
