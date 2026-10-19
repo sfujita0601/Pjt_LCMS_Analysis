@@ -345,8 +345,41 @@ def _rgba(color, alpha):
     return color
 
 
+def _nice_ticks(lo, hi, n=5):
+    span = hi - lo
+    if not np.isfinite(span) or span <= 0:
+        return []
+    raw = span / n
+    mag = 10 ** np.floor(np.log10(raw))
+    step = min((m * mag for m in (1, 2, 2.5, 5, 10) if m * mag >= raw), default=raw)
+    start = np.ceil(lo / step) * step
+    ticks = np.arange(start, hi + step * 1e-9, step)
+    return [float(np.round(t, 10)) for t in ticks]
+
+
+def radar_tick_text(v, kind, mode, base=None):
+    """円周の値の表示。kind: log2 (log2 比) / ratio (比) / pct (% 変化) / value。mode: 倍率と % / 倍率 / % / 値。"""
+    v = 0.0 if abs(v) < 1e-12 else v
+    if kind in ("log2", "ratio", "pct") and mode != "値":
+        fold = 2.0 ** v if kind == "log2" else (v if kind == "ratio" else 1 + v / 100)
+        fold = 0.0 if abs(fold) < 1e-12 else fold  # -0 と表示しない
+        pct = (fold - 1) * 100
+        f_txt, p_txt = f"×{fold:.3g}", f"{pct:+.0f}%"
+        if abs(pct) < 1e-9:
+            p_txt = "±0%"
+        txt = {"倍率と %": f"{f_txt} ({p_txt})", "倍率": f_txt, "%": p_txt}.get(mode, f"{v:g}")
+    else:
+        txt = f"{v:+g}" if base == 0 and v != 0 else f"{v:g}"
+    if base is not None and abs(v - base) < 1e-12:
+        if kind in ("log2", "ratio", "pct") and mode != "値":
+            txt = "±0%" if mode == "%" else "×1"
+        txt += " (基準)"
+    return txt
+
+
 def radar_plot(table, conds, compounds, pal, base=None, ref_name="", disp_style="誤差線", facet=False, ncols=3,
-               r_range=None, star_text=None, title="", value_title=""):
+               r_range=None, star_text=None, title="", value_title="", tick_kind="value", tick_mode="倍率と %",
+               tick_size=11):
     """レーダーチャート。table: lcms_radar.radar_table の結果 (condition, 化合物, 値, 下限, 上限)。
 
     disp_style: 誤差線 (各軸に下限〜上限の線) / 帯 (下限〜上限を塗る) / なし。
@@ -362,8 +395,8 @@ def radar_plot(table, conds, compounds, pal, base=None, ref_name="", disp_style=
         cols = max(1, min(ncols, n))
         rows = int(np.ceil(n / cols))
         fig = make_subplots(rows=rows, cols=cols, specs=[[{"type": "polar"}] * cols for _ in range(rows)],
-                            subplot_titles=[str(c) for c in conds], horizontal_spacing=0.08,
-                            vertical_spacing=0.12 / max(rows - 1, 1) if rows > 1 else 0.1)
+                            subplot_titles=[str(c) for c in conds], horizontal_spacing=0.12,
+                            vertical_spacing=min(0.3, 0.6 / rows) if rows > 1 else 0.1)
         pos = {c: dict(row=i // cols + 1, col=i % cols + 1) for i, c in enumerate(conds)}
     else:
         fig = go.Figure()
@@ -408,11 +441,23 @@ def radar_plot(table, conds, compounds, pal, base=None, ref_name="", disp_style=
             customdata=np.vstack([custom, custom[:1]]),
             hovertemplate="%{theta}<br>" + str(cond) + ": %{r:.4g}<br>範囲 %{customdata[0]:.4g} – %{customdata[1]:.4g}"
                           "<extra></extra>"), **kw)
-    polar = dict(radialaxis=dict(title=None, gridcolor="#d9d8d0", linecolor="#898781", angle=90 - 180 / len(compounds)),
+    r_angle = 90 - 180 / len(compounds)  # 最初の 2 本の軸の間に目盛りを置く
+    polar = dict(radialaxis=dict(title=None, gridcolor="#d9d8d0", linecolor="#898781", angle=r_angle,
+                                 tickfont=dict(size=tick_size), tickangle=r_angle, ticks=""),  # 文字を水平にする
                  angularaxis=dict(direction="clockwise", rotation=90, gridcolor="#e6e5de"))
     if r_range is not None:
         polar["radialaxis"]["range"] = list(r_range)
+        ticks = _nice_ticks(*r_range, n=6)
+        if base is not None and r_range[0] <= base <= r_range[1] and all(abs(t - base) > 1e-12 for t in ticks):
+            ticks = sorted(ticks + [base])
+        if ticks:
+            polar["radialaxis"].update(tickmode="array", tickvals=ticks,
+                                       ticktext=[radar_tick_text(t, tick_kind, tick_mode, base) for t in ticks])
     fig.update_polars(**polar)
-    h = 620 if not facet else 380 * int(np.ceil(n / max(1, min(ncols, n)))) + 80
-    fig.update_layout(height=h, title=title, legend_title_text=value_title, margin=dict(l=70, r=70, t=80, b=50))
+    rows_n = int(np.ceil(n / max(1, min(ncols, n)))) if facet else 1
+    h = 640 if not facet else 420 * rows_n + 100
+    fig.update_layout(height=h, title=dict(text=title, x=0.0, xanchor="left", y=1.0, yanchor="top", pad=dict(t=12, l=8)),
+                      legend_title_text=value_title, margin=dict(l=80, r=80, t=130, b=60))
+    if facet:  # 各図のタイトルを、最上部の化合物名と重ならないよう上にずらす
+        fig.update_annotations(yshift=34)
     return fig

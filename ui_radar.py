@@ -66,6 +66,10 @@ def radar_tab(base, groups, conds, control, compounds, pal):
         test = c3.selectbox("検定", tests, index=tests.index("Welch の t 検定") if "Welch の t 検定" in tests else 0,
                             key="rad_test", disabled=not sig)
         corr = c3.selectbox("多重性補正", list(ls.CORRECTIONS), key="rad_corr", disabled=not sig)
+        tick_mode = c1.selectbox("円周の値の表示", ["倍率と %", "倍率", "%", "値"], key="rad_tickmode",
+                                 disabled=metric not in (lr.M_FC, lr.M_LOG2FC, lr.M_PCT),
+                                 help="各円の値を、基準からの倍率 (×1.5) や増減率 (+50%) で表示します")
+        tick_size = c1.number_input("円周の値の文字の大きさ", 6, 30, 11, key="rad_ticksize")
         n_boot = c1.number_input("ブートストラップの回数", 200, 20000, 2000, 500, key="rad_nboot",
                                  disabled=disp != lr.D_BOOT)
     if len(sel) < 3:
@@ -114,7 +118,8 @@ def radar_tab(base, groups, conds, control, compounds, pal):
         title += f" ± {disp.split(' (')[0]}"
     fig = radar_plot(table, drawn, axes, pal, base=b, ref_name=ref, disp_style=style if disp != lr.D_NONE else "なし",
                      facet=facet, ncols=int(ncols), r_range=r_range, star_text=star_text, title=f"{title} ({group})",
-                     value_title="condition")
+                     value_title="condition", tick_mode=tick_mode, tick_size=int(tick_size),
+                     tick_kind={lr.M_LOG2FC: "log2", lr.M_FC: "ratio", lr.M_PCT: "pct"}.get(metric, "value"))
     show_chart(st, fig)
 
     notes = [_FORMULA[metric]]

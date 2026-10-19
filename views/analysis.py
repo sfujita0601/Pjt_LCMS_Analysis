@@ -69,7 +69,7 @@ def range_label(stat):
 
 # ---------------------------------------------------------------- condition 入力
 USE_COL = "使用"
-BULK_COND, BULK_OFF, BULK_ON = "condition を設定", "解析に使わない", "解析に使う"
+BULK_COND, BULK_OFF, BULK_ON, BULK_ISG = "condition を設定", "解析に使わない", "解析に使う", "IS 補正グループを設定"
 from lcms_pipeline import META_COLS, SAMPLE_TYPES, SUBJECT_COL, T_SAMPLE, T_STD, TIME_COL, TYPE_COL, apply_metadata
 
 
@@ -109,9 +109,9 @@ def condition_editor(ds, labels):
     with st.expander("一括入力 / 対応表 CSV の読み込み"):
         c1, c2, c3, c4 = st.columns([2, 1.3, 2, 1])
         pat = c1.text_input("label に含まれる文字列 (正規表現可)", key=f"pat::{ds}", placeholder="例: ^D-(1|2|3|4|5)$")
-        action = c2.selectbox("操作", [BULK_COND, BULK_OFF, BULK_ON], key=f"act::{ds}")
-        val = c3.text_input("設定する condition", key=f"val::{ds}", placeholder="例: Control",
-                            disabled=action != BULK_COND)
+        action = c2.selectbox("操作", [BULK_COND, BULK_ISG, BULK_OFF, BULK_ON], key=f"act::{ds}")
+        val = c3.text_input("設定する condition / IS 補正グループ", key=f"val::{ds}", placeholder="例: Control / マウス",
+                            disabled=action not in (BULK_COND, BULK_ISG))
         if c4.button("一括設定", key=f"_btn_bulk::{ds}", disabled=not pat):
             cur = ss.get(cur_key, ss[init_key]).copy()
             try:
@@ -123,6 +123,8 @@ def condition_editor(ds, labels):
             else:
                 if action == BULK_COND:
                     cur.loc[mask, COND_COL] = val
+                elif action == BULK_ISG:
+                    cur.loc[mask, lp.IS_GROUP_COL] = val
                 else:
                     cur.loc[mask, USE_COL] = action == BULK_ON
                 reset_editor(cur)
@@ -161,6 +163,9 @@ def condition_editor(ds, labels):
             SUBJECT_COL: st.column_config.TextColumn(SUBJECT_COL, help="同じ個体の再注入・技術反復には同じ ID を (空欄 = label)"),
             TIME_COL: st.column_config.TextColumn(TIME_COL, help="同じ個体を複数時点で測った場合の時点"),
             lp.SERUM_COL: st.column_config.TextColumn(lp.SERUM_COL, help="出発血清量を試料ごとに変える場合だけ入力 (空欄 = サイドバーの設定)"),
+            lp.IS_GROUP_COL: st.column_config.TextColumn(
+                lp.IS_GROUP_COL, help="IS 補正の平均を別々に取る試料のまとまり (例: マウス / ラット)。"
+                                      "同じ名前の試料の中だけで IS 平均を取ります (空欄の試料どうしで 1 グループ)"),
         },
     )
     ss[cur_key] = edited
@@ -495,6 +500,7 @@ def single_mode(d):
         cond_filter = st.multiselect("condition で絞り込み (空欄 = すべて)", conds, key=f"cond_filter::{d['name']}",
                                      help="個別のサンプルの除外は 条件設定 タブの「使用」列で行います")
     qset.volume_by_label = lp.volume_overrides(meta, const_expr) if vol_on else {}
+    qset.is_group_by_label = lp.is_groups(meta)
     result = run_pipeline(d, ranges_edit, choices, used)
     base, compounds, factors, result = make_base(d, cond_map, control, result, used, cond_filter, meta)
     with tab_prov:
@@ -541,17 +547,27 @@ def single_mode(d):
         st.download_button("CSV をダウンロード", to_csv_bytes(raw_c, na_rep), f"{d['name']}_conc.csv", "text/csv",
                            key="_dl_raw")
 
-        st.subheader(f"IS 補正後の換算濃度 (内部標準: {is_name}, STD を除く)")
-        if d["is_df"] is None:
+        st.subheader(f"IS 補正後の濃度 (内部標準: {is_name}, STD を除く)")
+        if is_name not in d["raw"]:
             st.warning("内部標準がデータにありません")
         else:
-            samples = d["raw"][~d["raw"][LABEL_COL].map(is_std)]
-            means = samples.groupby(samples[la.DILUTION_COL].map(la.group_name))[is_name].agg(["mean", "count"])
+            means = lp.is_means(d["raw"], is_name, used, qset.is_group_by_label)
+            means["希釈"] = means["希釈"].map(la.group_name)
+            has_grp = (means[lp.IS_GROUP_COL] != "").any()
             st.markdown(
-                "IS 平均: " + " ・ ".join(f"**{g}** {r['mean']:.3f} (n={int(r['count'])})" for g, r in means.iterrows())
-                + "  \n比率 = IS 濃度 / 希釈グループ内平均、換算濃度 = 濃度 × (1 / 比率)"
-            )
-            is_c = keep_used(la.with_condition(d["is_df"], cond_map), used, show_all_tbl)
+                "IS 平均 (「使用」の試料のみ): " + " ・ ".join(
+                    f"**{r['希釈']}{' / ' + (r[lp.IS_GROUP_COL] or '(空欄)') if has_grp else ''}** {r['平均']:.3f} (n={int(r['n'])})"
+                    for _, r in means.iterrows())
+                + "  \n係数 = " + ("(希釈グループ x IS 補正グループ)" if has_grp else "希釈グループ")
+                + " 内の IS 平均 / 各ファイルの IS、補正後 = 補正前 × 係数 (バイアル中濃度。希釈倍率・換算係数は掛けていません)。"
+                + ("" if qset.is_applied() else " **現在の設定では、解析に使う表に IS 補正はかかっていません。**"))
+            isf = lp.is_factors(d["raw"], is_name, used, qset.is_group_by_label)
+            is_tab = d["raw"].copy()
+            is_tab.insert(3, lp.IS_GROUP_COL, is_tab[LABEL_COL].map(lambda lb: qset.is_group_by_label.get(lb, "")))
+            is_tab.insert(4, "IS 係数", isf.values.round(4))
+            is_tab[d["compounds"]] = is_tab[d["compounds"]].mul(isf.values, axis=0).round(3)
+            is_tab = is_tab[~is_tab[LABEL_COL].map(is_std)]
+            is_c = keep_used(la.with_condition(is_tab, cond_map), used, show_all_tbl)
             st.dataframe(is_c, hide_index=True, height=320)
             st.download_button("CSV をダウンロード", to_csv_bytes(is_c, na_rep), f"{d['name']}_conc_IS.csv",
                                "text/csv", key="_dl_is")
@@ -830,6 +846,7 @@ def multi_mode(datasets):
     for d in datasets:
         cond_map, conds, control, used, meta = settings[d["name"]]
         qset.volume_by_label = lp.volume_overrides(meta, const_expr) if vol_on else {}
+        qset.is_group_by_label = lp.is_groups(meta)
         b, _, _, _ = make_base(d, cond_map, control, used=used, meta=meta)
         b = b[b[COND_COL] != ""]
         if control is None or not (b[COND_COL] == control).any():

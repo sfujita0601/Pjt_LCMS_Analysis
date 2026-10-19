@@ -81,6 +81,8 @@ STATUS_ORDER = [ST_OK, ST_CHECK, ST_UNDER, ST_LOQ, ST_LOD, ST_ND, ST_OVER, ST_RE
 ADOPTABLE = {ST_OK, ST_CHECK, ST_UNDER, ST_LOQ, ST_LOD}
 
 
+IS_GROUP_COL = "IS 補正グループ"
+
 @dataclass
 class QuantSettings:
     quant_method: str = QM_UNSET
@@ -92,6 +94,7 @@ class QuantSettings:
     volume_factor: float | None = None  # 前処理による体積換算 (None = 換算しない)
     volume_def: str = ""
     volume_by_label: dict = field(default_factory=dict)  # 試料ごとの換算係数 (出発血清量を個別に指定した場合)
+    is_group_by_label: dict = field(default_factory=dict)  # IS 補正グループ (label -> グループ名。空欄の試料は共通グループ)
     unit: str = "未設定"            # LabSolutions の濃度の単位 (エクスポートに含まれないため利用者が設定)
     consistency_tol: float = 20.0   # 希釈間の一致の許容 (%)
     reinjection: str = REINJECT_FIRST
@@ -150,17 +153,42 @@ def diagnose_quant_method(full, is_name):
     return dict(n_compounds=int(len(g)), cv_external=ce, cv_internal=ci, hint=hint)
 
 
-def is_factors(raw, is_name, used=None):
-    """アプリでの IS 補正係数 (ファイルごと)。係数 = 希釈グループ内の IS 平均 / そのファイルの IS。
+def _is_group_of(groups):
+    groups = groups or {}
+    return lambda lb: str(groups.get(lb, "") or "").strip()
 
-    STD と、解析に使わない試料 (used に含まれない label) は除いて平均を取る。
-    IS が未検出のファイルは NaN (補正できないので、その値は欠損になる)。
+
+def is_means(raw, is_name, used=None, groups=None):
+    """IS 補正に使う IS の平均 (希釈グループ x IS 補正グループ ごと)。列: 希釈, IS 補正グループ, 平均, n。
+
+    STD と、解析に使わない試料 (used に含まれない label) は除く。groups: label -> IS 補正グループ (空欄 = 共通)。
     """
     samples = raw[~raw[LABEL_COL].map(is_std)]
     if used is not None:
         samples = samples[samples[LABEL_COL].isin(used)]
-    means = samples.groupby(DILUTION_COL)[is_name].mean()
-    f = raw[DILUTION_COL].map(means) / raw[is_name]
+    g = samples[LABEL_COL].map(_is_group_of(groups))
+    out = samples.assign(**{IS_GROUP_COL: g}).groupby([DILUTION_COL, IS_GROUP_COL])[is_name].agg(["mean", "count"])
+    return out.reset_index().rename(columns={DILUTION_COL: "希釈", "mean": "平均", "count": "n"})
+
+
+def is_factors(raw, is_name, used=None, groups=None):
+    """アプリでの IS 補正係数 (ファイルごと)。係数 = (希釈グループ x IS 補正グループ) 内の IS 平均 / そのファイルの IS。
+
+    STD と、解析に使わない試料 (used に含まれない label) は除いて平均を取る。
+    groups (label -> IS 補正グループ) を指定すると、グループごとに別々の平均で補正する
+    (例: 同じバッチで測ったマウスとラットの試料を、それぞれの中で補正する)。
+    平均を取れる試料が無いグループ (STD・すべて「使用」を外したグループ) は、希釈グループ全体の平均を使う。
+    IS が未検出のファイルは NaN (補正できないので、その値は欠損になる)。
+    """
+    m = is_means(raw, is_name, used, groups)
+    by_group = {(d, g): v for d, g, v in zip(m["希釈"], m[IS_GROUP_COL], m["平均"])}
+    samples = raw[~raw[LABEL_COL].map(is_std)]
+    if used is not None:
+        samples = samples[samples[LABEL_COL].isin(used)]
+    overall = samples.groupby(DILUTION_COL)[is_name].mean()
+    grp = raw[LABEL_COL].map(_is_group_of(groups))
+    means = [by_group.get((d, g), overall.get(d, np.nan)) for d, g in zip(raw[DILUTION_COL], grp)]
+    f = pd.Series(means, index=raw.index, dtype=float) / raw[is_name]
     return pd.Series(f.values, index=raw[FILE_COL].values, name="IS 係数")
 
 
@@ -243,8 +271,10 @@ def run(full, raw, compounds, settings, ranges, choices=None, merge=False, mult_
 
     # IS 係数
     if settings.is_applied():
-        isf = is_factors(raw, settings.is_name, used)
-        notes.append(f"IS 補正: 係数 = 希釈グループ内の {settings.is_name} 平均 / 各ファイルの {settings.is_name}")
+        isf = is_factors(raw, settings.is_name, used, settings.is_group_by_label)
+        grp_names = sorted({g for g in settings.is_group_by_label.values() if g})
+        where = f"希釈グループ x IS 補正グループ ({', '.join(grp_names)}) ごと" if grp_names else "希釈グループ内"
+        notes.append(f"IS 補正: 係数 = {where}の {settings.is_name} 平均 / 各ファイルの {settings.is_name}")
     else:
         isf = pd.Series(1.0, index=raw[FILE_COL].values)
         if settings.app_is and settings.quant_method == QM_INTERNAL:
@@ -450,7 +480,14 @@ def _apply_mask(values, prov, full, compounds, level, repl, merge):
 
 # ---------------------------------------------------------------- 試料のメタデータと生物学的 n
 TYPE_COL, SUBJECT_COL, TIME_COL, SERUM_COL = "試料種別", "個体ID", "時点", "血清量 (µL)"
-META_COLS = [TYPE_COL, SUBJECT_COL, TIME_COL, SERUM_COL, "実験回", "前処理バッチ", "測定バッチ"]
+META_COLS = [TYPE_COL, SUBJECT_COL, TIME_COL, SERUM_COL, IS_GROUP_COL, "実験回", "前処理バッチ", "測定バッチ"]
+
+
+def is_groups(meta):
+    """条件設定の「IS 補正グループ」が入力された試料 {label: グループ名}。"""
+    if meta is None or IS_GROUP_COL not in meta:
+        return {}
+    return {lb: str(v).strip() for lb, v in meta[IS_GROUP_COL].items() if str(v).strip() and str(v) != "nan"}
 
 
 def volume_overrides(meta, const_expr):
