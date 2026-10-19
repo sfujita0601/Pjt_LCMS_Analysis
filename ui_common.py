@@ -181,6 +181,11 @@ def figure_settings():
         c1.number_input("凡例の大きさ (0 = 既定)", 0, 48, 0, key="fig_legend_size")
         c2.number_input("図タイトルの大きさ (0 = 既定)", 0, 48, 0, key="fig_head_size")
         st.radio("画面の背景", ["テーマに合わせる", "白"], key="fig_bg", horizontal=True)
+        st.markdown("**すべての図の既定の大きさ** (各図の「大きさ・保存」で図ごとに上書きできます)")
+        c1, c2 = st.columns(2)
+        c1.number_input("幅 (px, 0 = 画面の幅)", 0, 4000, 0, 50, key="fig_w",
+                        help="0 のとき画面では横幅いっぱい、保存時は 1100 px")
+        c2.number_input("高さ (px, 0 = 図ごとの既定)", 0, 4000, 0, 50, key="fig_h")
         st.divider()
         st.selectbox("保存形式", list(SAVE_FORMATS), key="fig_format",
                      help="各図の「図を保存」で使う形式。PDF・SVG は拡大しても劣化しないベクター形式")
@@ -244,6 +249,12 @@ def show_chart(container, fig, key=None, width="stretch", **kwargs):
     _chart_count[0] += 1
     key = key or f"chart{_chart_count[0]}"
     style_figure(fig)
+    w, h = figure_size(fig, key)
+    if w:
+        fig.update_layout(width=w)
+        width = "content"
+    if h:
+        fig.update_layout(height=h)
     white = ss.get("fig_bg") == "白"
     if white:
         _white(fig)
@@ -251,11 +262,24 @@ def show_chart(container, fig, key=None, width="stretch", **kwargs):
     fmt = SAVE_FORMATS[fmt_name]
     title = fig.layout.title.text if fig.layout.title and fig.layout.title.text else key
     fname = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in str(title))[:60] or "figure"
-    config = {"displaylogo": False,
-              "toImageButtonOptions": {"format": fmt if fmt in ("png", "svg", "jpeg") else "png",
-                                       "filename": fname, "scale": ss.get("fig_scale", 3)}}
+    img_opts = {"format": fmt if fmt in ("png", "svg", "jpeg") else "png", "filename": fname,
+                "scale": ss.get("fig_scale", 3)}
+    if w:
+        img_opts["width"] = w
+    if h:
+        img_opts["height"] = h
+    config = {"displaylogo": False, "toImageButtonOptions": img_opts}
     container.plotly_chart(fig, width=width, key=key, config=config, theme=None if white else "streamlit", **kwargs)
-    with container.popover(f"図を保存 ({fmt_name})", icon=":material/download:"):
+    with container.popover(f"大きさ・保存 ({fmt_name})", icon=":material/download:"):
+        st.markdown("**この図の大きさ** (0 = サイドバーの「図の設定」の既定)")
+        c1, c2, c3 = st.columns([1, 1, 0.8])
+        c1.number_input("幅 (px)", 0, 4000, step=50, key=f"figw::{key}")
+        c2.number_input("高さ (px)", 0, 4000, step=50, key=f"figh::{key}")
+        c3.button("既定に戻す", key=f"_btn_size_{key}", on_click=_reset_size, args=(key,))
+        cur_h = fig.layout.height or 450
+        st.caption(f"現在: 幅 {f'{w} px' if w else '画面の幅 (保存時 1100 px)'}、高さ {cur_h} px。"
+                   "幅と高さは画面の表示と保存の両方に反映します。")
+        st.divider()
         st.caption("形式・背景・解像度はサイドバーの「図の設定」で変えられます。")
         if st.button("作成", key=f"_btn_save_{key}"):
             try:
@@ -266,6 +290,19 @@ def show_chart(container, fig, key=None, width="stretch", **kwargs):
         data = ss.get(f"_img_{key}")
         if data:
             st.download_button(f"{fname}.{fmt} をダウンロード", data, f"{fname}.{fmt}", key=f"_dl_save_{key}")
+
+
+def figure_size(fig, key):
+    """図の幅と高さ (px)。図ごとの設定 → サイドバーの既定 の順。0 / None は指定なし (幅は画面の幅、高さは図の既定)。"""
+    ss = st.session_state
+    w = ss.get(f"figw::{key}") or ss.get("fig_w") or (fig.layout.width if fig.layout.width else 0)
+    h = ss.get(f"figh::{key}") or ss.get("fig_h") or 0
+    return int(w), int(h)
+
+
+def _reset_size(key):
+    st.session_state[f"figw::{key}"] = 0
+    st.session_state[f"figh::{key}"] = 0
 
 
 def reset_chart_counter():
